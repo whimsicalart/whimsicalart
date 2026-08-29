@@ -61,6 +61,14 @@ WhimsicalArt exists to provide a modern, open-source alternative that respects u
    adb install app/build/outputs/apk/debug/app-debug.apk
    ```
 
+## Documentation
+
+- [User Guide](docs/USER_GUIDE.md) — how to use the app
+- [Developer Documentation](docs/DEVELOPMENT.md) — architecture and conventions
+- [API Overview](docs/API.md) — public types by module
+- [Contributing Guidelines](CONTRIBUTING.md)
+- [Privacy Policy](PRIVACY.md)
+
 ## Contributing
 
 Contributions are welcome! Please read our [Contributing Guidelines](CONTRIBUTING.md) before submitting a pull request.

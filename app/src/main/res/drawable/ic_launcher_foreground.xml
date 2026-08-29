@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    
+    <!-- Prism (triangle) -->
+    <path
+        android:pathData="M54,20 L28,72 L80,72 Z"
+        android:fillColor="#E8E8E8"/>
+    
+    <!-- Prism edges -->
+    <path
+        android:pathData="M54,20 L28,72 L80,72 Z"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="0.5"
+        android:fillColor="#00000000"/>
+    
+    <!-- Light beam entering -->
+    <path
+        android:pathData="M12,42 L35,48"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000"/>
+    
+    <!-- Rainbow spectrum exiting -->
+    <path android:pathData="M72,52 L98,40" android:strokeColor="#FF6B6B" android:strokeWidth="1" android:strokeLineCap="round" android:fillColor="#00000000"/>
+    <path android:pathData="M73,56 L99,46" android:strokeColor="#FFB347" android:strokeWidth="1" android:strokeLineCap="round" android:fillColor="#00000000"/>
+    <path android:pathData="M74,60 L100,52" android:strokeColor="#FFED47" android:strokeWidth="1" android:strokeLineCap="round" android:fillColor="#00000000"/>
+    <path android:pathData="M74,64 L100,60" android:strokeColor="#47D147" android:strokeWidth="1" android:strokeLineCap="round" android:fillColor="#00000000"/>
+    <path android:pathData="M74,68 L100,68" android:strokeColor="#47B8FF" android:strokeWidth="1" android:strokeLineCap="round" android:fillColor="#00000000"/>
+    <path android:pathData="M74,72 L99,78" android:strokeColor="#7B68EE" android:strokeWidth="1" android:strokeLineCap="round" android:fillColor="#00000000"/>
+    <path android:pathData="M73,76 L98,86" android:strokeColor="#DDA0DD" android:strokeWidth="1" android:strokeLineCap="round" android:fillColor="#00000000"/>
+    
+    <!-- W letter inside prism (bigger) -->
+    <path
+        android:pathData="M36,52 L42,68 L48,58 L54,68 L60,58 L66,68 L72,52"
+        android:strokeColor="#578FFF"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000"/>
+</vector>

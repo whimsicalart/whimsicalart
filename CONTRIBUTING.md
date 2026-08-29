@@ -14,9 +14,21 @@ Thank you for your interest in contributing to WhimsicalArt! This document provi
 
 ### Prerequisites
 
-- Android Studio Hedgehog (2023.1.1) or newer
+- Android Studio (Iguana 2024.2.1) or newer
 - JDK 17
-- Android SDK 34
+- Android SDK 35 (compileSdk), with minSdk 26 / targetSdk 34
+
+### Module Layout
+
+The project is a multi-module Gradle build powered by version-catalog conventions:
+
+| Path | Purpose |
+|------|---------|
+| `app/` | Application entry point, theme, navigation |
+| `core/` | Shared domain, data, and common utilities |
+| `feature/` | Editor, filters, beauty, collage, stickers, gallery, settings |
+| `designsystem/` | Design system components |
+| `build-logic/` | Convention plugins for app/library/Hilt/Room modules |
 
 ### Building
 
@@ -24,11 +36,38 @@ Thank you for your interest in contributing to WhimsicalArt! This document provi
 ./gradlew assembleDebug
 ```
 
+Build configuration is centralized:
+
+- **Versions** live in `gradle.properties` (`VERSION_CODE`, `VERSION_NAME`) and are exposed via generated `BuildConfig`
+- **Dependencies** are declared in `gradle/libs.versions.toml`
+- **CI** validates `assembleDebug`, unit tests, and lint on every push/PR (`.github/workflows/ci.yml`)
+
 ### Running Tests
 
 ```bash
-./gradlew test
+./gradlew testDebugUnitTest
+./gradlew lintDebug
 ```
+
+### Release & Signing
+
+Local release builds are signed through a gitignored `keystore.properties` at the repository root:
+
+```properties
+storeFile=keystore/release.keystore
+storePassword=<your-store-password>
+keyAlias=whimsicalart
+keyPassword=<your-key-password>
+```
+
+If `keystore.properties` is absent, release builds fall back to the debug signing
+config so the project still compiles on a fresh checkout.
+
+Cutting a release is handled by `.github/workflows/release.yml`: pushing a tag like
+`v1.0.0` builds and verifies a signed APK and publishes a GitHub Release. Signing
+credentials are injected from repository secrets (`KEYSTORE_BASE64`,
+`KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`) — never commit keystore
+material or passwords to the repository.
 
 ## Code Style
 
