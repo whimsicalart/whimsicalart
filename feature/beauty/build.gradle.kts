@@ -7,11 +7,17 @@ plugins {
 }
 
 android {
-    namespace = "com.whimsicalart.feature.beauty"
+    namespace = "codes.pepper.whimsicalart.feature.beauty"
     compileSdk = 35
 
     defaultConfig {
         minSdk = 26
+    }
+
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
     }
 
     compileOptions {
@@ -45,6 +51,7 @@ dependencies {
     implementation(libs.compose.foundation)
     
     implementation(libs.mlkit.face.detection)
+    implementation(libs.mediapipe.tasks.vision)
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)

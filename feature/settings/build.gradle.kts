@@ -7,7 +7,7 @@ plugins {
 }
 
 android {
-    namespace = "com.whimsicalart.feature.settings"
+    namespace = "codes.pepper.whimsicalart.feature.settings"
     compileSdk = 35
 
     defaultConfig {
@@ -31,8 +31,10 @@ android {
 dependencies {
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
+    implementation(libs.hilt.navigation.compose)
     implementation(project(":core:designsystem"))
     implementation(project(":core:data"))
+    implementation(project(":core:common"))
     
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
@@ -42,4 +44,8 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.compose.material3)
     implementation(libs.compose.foundation)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
 }

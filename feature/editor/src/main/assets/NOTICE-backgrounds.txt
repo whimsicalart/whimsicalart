@@ -1,0 +1,17 @@
+Bundled background replacement images
+=====================================
+
+The images in res/drawable/bg_*.jpg are free stock photographs obtained from
+Pexels (https://www.pexels.com) and are licensed under the Pexels License,
+which permits free commercial and non-commercial use without attribution.
+For details see https://www.pexels.com/license/
+
+Photos used:
+- bg_landscape.jpg  Pexels photo 933054
+- bg_office.jpg     Pexels photo 380769
+- bg_park.jpg       Pexels photo 1257110
+- bg_library.jpg    Pexels photo 2041540
+- bg_coffee.jpg     Pexels photo 302899
+- bg_mountains.jpg  Pexels photo 417074
+- bg_room.jpg       Pexels photo 1571460
+- bg_city.jpg       Pexels photo 466685

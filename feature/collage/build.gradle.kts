@@ -7,7 +7,7 @@ plugins {
 }
 
 android {
-    namespace = "com.whimsicalart.feature.collage"
+    namespace = "codes.pepper.whimsicalart.feature.collage"
     compileSdk = 35
 
     defaultConfig {
@@ -25,6 +25,12 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
     }
 }
 
@@ -50,4 +56,11 @@ dependencies {
     implementation(libs.compose.material.icons.extended)
     
     implementation(libs.coil.compose)
+
+    implementation(libs.mlkit.face.detection)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
+    testImplementation(libs.coroutines.test)
 }

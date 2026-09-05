@@ -32,6 +32,19 @@ robolectric = "4.14.1"
 
 # ML Kit
 mlkitFaceDetection = "16.1.7"
+mlkitTextRecognition = "16.0.1"
+mlkitImageLabeling = "17.0.8"
+
+# MediaPipe Tasks (LiteRT) — on-device face landmarking + hair segmentation for beauty tools.
+# 0.10.x is pure-Java (no Kotlin metadata concern) and wraps the LiteRT runtime, custom ops and
+# the face-detection -> geometry pipeline internally.
+mediapipeTasksVision = "0.10.29"
+
+# LiteRT (TensorFlow Lite) — on-device person segmentation for background tools
+# 1.4.2 keeps the classic org.tensorflow.lite.Interpreter API while staying
+# compatible with the project's Kotlin 2.1.0 toolchain (2.2.0 ships a Kotlin
+# 2.3.0-metadata api variant that breaks KSP).
+litert = "1.4.2"
 
 # Coroutines
 coroutines = "1.9.0"
@@ -76,6 +89,14 @@ coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coi
 
 # ML Kit
 mlkit-face-detection = { group = "com.google.mlkit", name = "face-detection", version.ref = "mlkitFaceDetection" }
+mlkit-text-recognition = { group = "com.google.mlkit", name = "text-recognition", version.ref = "mlkitTextRecognition" }
+mlkit-image-labeling = { group = "com.google.mlkit", name = "image-labeling", version.ref = "mlkitImageLabeling" }
+
+# MediaPipe Tasks (LiteRT) — face landmarking + hair segmentation for beauty
+mediapipe-tasks-vision = { group = "com.google.mediapipe", name = "tasks-vision", version.ref = "mediapipeTasksVision" }
+
+# LiteRT (TensorFlow Lite) — on-device person segmentation
+litert = { group = "com.google.ai.edge.litert", name = "litert", version.ref = "litert" }
 
 # Coroutines
 coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }

@@ -7,7 +7,7 @@ plugins {
 }
 
 android {
-    namespace = "com.whimsicalart.feature.filters"
+    namespace = "codes.pepper.whimsicalart.feature.filters"
     compileSdk = 35
 
     defaultConfig {

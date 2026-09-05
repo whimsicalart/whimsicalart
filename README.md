@@ -63,9 +63,9 @@ WhimsicalArt exists to provide a modern, open-source alternative that respects u
 
 ## Documentation
 
-- [User Guide](docs/USER_GUIDE.md) — how to use the app
-- [Developer Documentation](docs/DEVELOPMENT.md) — architecture and conventions
-- [API Overview](docs/API.md) — public types by module
+- [User Guide](docs/user_guide.md) — how to use the app
+- [Developer Documentation](docs/development.md) — architecture and conventions
+- [API Overview](docs/api.md) — public types by module
 - [Contributing Guidelines](CONTRIBUTING.md)
 - [Privacy Policy](PRIVACY.md)
 

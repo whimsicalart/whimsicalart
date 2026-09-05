@@ -7,7 +7,7 @@ plugins {
 }
 
 android {
-    namespace = "com.whimsicalart.feature.camera"
+    namespace = "codes.pepper.whimsicalart.feature.camera"
     compileSdk = 35
 
     defaultConfig {
@@ -37,9 +37,14 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.activity.compose)
     
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.material3)
     implementation(libs.compose.foundation)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
 }

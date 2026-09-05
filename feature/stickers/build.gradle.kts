@@ -7,7 +7,7 @@ plugins {
 }
 
 android {
-    namespace = "com.whimsicalart.feature.stickers"
+    namespace = "codes.pepper.whimsicalart.feature.stickers"
     compileSdk = 35
 
     defaultConfig {

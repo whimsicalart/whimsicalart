@@ -7,7 +7,7 @@ plugins {
 }
 
 android {
-    namespace = "com.whimsicalart.feature.editor"
+    namespace = "codes.pepper.whimsicalart.feature.editor"
     compileSdk = 35
 
     defaultConfig {
@@ -26,6 +26,12 @@ android {
     buildFeatures {
         compose = true
     }
+
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
 }
 
 dependencies {
@@ -37,6 +43,7 @@ dependencies {
     implementation(project(":core:data"))
     implementation(project(":feature:filters"))
     implementation(project(":feature:stickers"))
+    implementation(project(":feature:beauty"))
     
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
@@ -50,6 +57,9 @@ dependencies {
     implementation(libs.compose.material.icons.extended)
     
     implementation(libs.coil.compose)
+    implementation(libs.litert)
+    implementation(libs.mlkit.face.detection)
+    implementation(libs.mlkit.text.recognition)
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)

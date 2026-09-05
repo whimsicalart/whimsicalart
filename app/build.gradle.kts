@@ -16,7 +16,7 @@ val keystoreProperties = Properties().apply {
 }
 
 android {
-    namespace = "com.whimsicalart"
+    namespace = "codes.pepper.whimsicalart"
     compileSdk = 35
 
     signingConfigs {
@@ -31,7 +31,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.whimsicalart"
+        applicationId = "codes.pepper.whimsicalart"
         minSdk = 26
         targetSdk = 34
         versionCode = project.findProperty("VERSION_CODE")?.toString()?.toIntOrNull() ?: 1
@@ -118,14 +118,19 @@ dependencies {
     implementation(libs.coroutines.android)
 
     // Feature modules
+    implementation(project(":core:common"))
     implementation(project(":feature:gallery"))
     implementation(project(":feature:editor"))
     implementation(project(":feature:beauty"))
     implementation(project(":feature:stickers"))
     implementation(project(":feature:collage"))
+    implementation(project(":feature:camera"))
+    implementation(project(":feature:settings"))
 
     // Testing
     testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.compose.bom))

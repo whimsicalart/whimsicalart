@@ -7,7 +7,7 @@ plugins {
 }
 
 android {
-    namespace = "com.whimsicalart.feature.gallery"
+    namespace = "codes.pepper.whimsicalart.feature.gallery"
     compileSdk = 35
 
     defaultConfig {
@@ -25,6 +25,12 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
     }
 }
 
@@ -48,6 +54,11 @@ dependencies {
     implementation(libs.compose.foundation)
     
     implementation(libs.coil.compose)
+    
+    implementation(libs.room.runtime)
+    implementation(libs.room.ktx)
+    ksp(libs.room.compiler)
+    implementation(libs.mlkit.image.labeling)
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)

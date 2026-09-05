@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.whimsicalart.core.data"
+    namespace = "codes.pepper.whimsicalart.core.data"
     compileSdk = 35
 
     defaultConfig {

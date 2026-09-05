@@ -149,6 +149,23 @@ Each feature module should contain:
 - Use LeakCanary for memory leak detection
 - Profile with Android Profiler for performance issues
 
+## Build & Test
+
+- **Fast build** (skip lint + tests): `scripts/build.sh nolint notest`
+- **Full build** (assemble + tests + lint — run before every commit): `scripts/build.sh`
+- **Reading build logs**: use `docker exec whimsicalart-build cat /tmp/build.log` (do NOT re-run the build over and over just to inspect output).
+
+## Manual / Device Testing
+
+- Start the emulator: `scripts/emulator.sh`
+- Once the emulator is running, use standard Android tools to drive the app:
+  - `uiautomator dump` / `uiautomator dump /dev/stdout` for view hierarchy
+  - `input text`, `input tap`, `input swipe`, `input keyevent` for interactions
+  - `screencap -p` for screenshots
+  - `logcat` for logs
+- Use the emulator's VNC mode (`scripts/emulator.sh vnc`) for visual inspection when needed.
+- Stop the emulator to release memory when no longer needed: `scripts/emulator.sh stop`
+
 ## Questions?
 
 For questions about architecture decisions or implementation details, check the project's technical documentation or open a discussion in the repository.
