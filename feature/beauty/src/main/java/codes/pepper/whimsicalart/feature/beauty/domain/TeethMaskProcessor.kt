@@ -9,9 +9,14 @@ import kotlin.math.roundToInt
  * Builds a per-pixel "teeth segmentation" alpha mask. Instead of blanching the
  * entire geometric mouth aperture (which also lightens gums/gloss), only pixels
  * that look tooth-like (bright) produce alpha, so whitening is confined to the
- * teeth. The gate is a luminance model with no native ML runtime, so it is fully
- * unit-testable under Robolectric; a learned teeth segmenter could later replace
- * it behind the same computing surface.
+ * teeth. The aperture polygon mirrors the MediaPipe Face Mesh **inner-lip ring**
+ * (the actual mouth opening where the teeth show) resampled to a node count
+ * proportional to the aperture's pixel footprint, falling back to the analytic
+ * lens between the mouth corners and the lip bands when no inner-lip contour is
+ * available; the ray-cast containment test handles the concave ring. The gate is
+ * a luminance model with no native ML runtime, so it is fully unit-testable
+ * under Robolectric; a learned teeth segmenter could later replace it behind the
+ * same computing surface.
  */
 object TeethMaskProcessor {
 
@@ -19,12 +24,12 @@ object TeethMaskProcessor {
     const val LUMINANCE_FLOOR = 200f
 
     /**
-     * Computes a whitening mask for [source], restricted to the convex mouth
-     * aperture [polygon] (the lens bounded by mouth corners and lip bands). Every
-     * pixel inside the polygon gets alpha = clip((lum - threshold) * gain) so
-     * bright tooth pixels are covered and dark gum/gloss are excluded; outside
-     * the polygon alpha is 0. The mask RGB is white, so drawing it through a
-     * LIGHTEN blend whitens by the alpha strength.
+     * Computes a whitening mask for [source], restricted to the mouth aperture
+     * [polygon] (the inner-lip ring when detected, else the lens bounded by
+     * mouth corners and lip bands). Every pixel inside the polygon gets alpha =
+     * clip((lum - threshold) * gain) so bright tooth pixels are covered and dark
+     * gum/gloss are excluded; outside the polygon alpha is 0. The mask RGB is
+     * white, so drawing it through a LIGHTEN blend whitens by the alpha strength.
      *
      * @return a source-sized ARGB mask, or null when the polygon has no area.
      */
@@ -43,21 +48,29 @@ object TeethMaskProcessor {
         val top = polygon.minOf { it.y }.toInt().coerceIn(0, h - 1)
         val right = (polygon.maxOf { it.x }.toInt() + 1).coerceIn(left + 1, w)
         val bottom = (polygon.maxOf { it.y }.toInt() + 1).coerceIn(top + 1, h)
+        val regionW = right - left
+        val regionH = bottom - top
 
-        val src = IntArray(w * h)
-        source.getPixels(src, 0, w, 0, 0, w, h)
+        // Rect-scoped read: the scan below never leaves the aperture bbox, so
+        // read ONLY that region instead of a full-canvas getPixels into a
+        // full-size IntArray — removes a full-frame JNI read and a full-size
+        // source array per whitening pass (the output mask stays source-sized).
+        val src = IntArray(regionW * regionH)
+        source.getPixels(src, 0, regionW, left, top, regionW, regionH)
         val mask = IntArray(w * h)
         val gain = 255f / (floor - threshold).coerceAtLeast(1f)
 
-        for (y in top until bottom) {
-            for (x in left until right) {
-                if (!contains(polygon, x + 0.5f, y + 0.5f)) continue
-                val srcIdx = y * w + x
+        for (y in 0 until regionH) {
+            val fullY = top + y
+            for (x in 0 until regionW) {
+                val fullX = left + x
+                if (!contains(polygon, fullX + 0.5f, fullY + 0.5f)) continue
+                val srcIdx = y * regionW + x
                 val lum = luminance(src[srcIdx])
                 val t = (lum - threshold).coerceAtLeast(0f)
                 val alpha = (t * gain).roundToInt().coerceIn(0, 255)
                 if (alpha > 0) {
-                    mask[srcIdx] = Color.argb(alpha, 255, 255, 255)
+                    mask[fullY * w + fullX] = Color.argb(alpha, 255, 255, 255)
                 }
             }
         }

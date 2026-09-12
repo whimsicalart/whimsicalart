@@ -33,4 +33,8 @@ dependencies {
     implementation(libs.compose.ui.graphics)
     implementation(libs.compose.material3)
     implementation(libs.compose.foundation)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
 }

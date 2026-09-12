@@ -304,4 +304,240 @@ class CropOverlayTest {
             kotlin.math.abs(refit.width - initial.width) > 0.001f
         )
     }
+
+    // --- normalizedAspectRatio + reshapeCropToRatio (exact fixed ratios) ------
+    // The image is letterboxed with ContentScale.Fit: a frame whose NORMALISED
+    // aspect is `r` displays as r·(W/H) on screen and crops to r·(W/H)·(H/W) =
+    // r pixels. So the frame must be locked to `ratio·(H/W)` in normalised units
+    // for the selected ratio to be EXACT (1:1 square etc.) both on screen and in
+    // the committed pixels — the regression this guards against.
+
+    @Test
+    fun `normalized target compensates for the image aspect`() {
+        // Landscape image 400x200: a displayed 1:1 square needs a 0.5-wide-for-1
+        // normalized frame (fit stretches normalized width by 2).
+        assertEquals(0.5f, normalizedAspectRatio(1f, Size(400f, 200f)), 0.001f)
+        // Portrait image 200x400: a displayed 1:1 square needs a 2:1 frame.
+        assertEquals(2f, normalizedAspectRatio(1f, Size(200f, 400f)), 0.001f)
+        // 4:3 on a 3:2 image.
+        assertEquals(
+            (4f / 3f) * (2f / 3f), normalizedAspectRatio(4f / 3f, Size(3f, 2f)), 0.001f
+        )
+        // Unknown image size falls back verbatim.
+        assertEquals(1f, normalizedAspectRatio(1f, Size.Zero), 0.001f)
+    }
+
+    private fun displayAspect(frame: Rect, image: Size): Float =
+        frame.width / frame.height * image.width / image.height
+
+    @Test
+    fun `selected ratios reshape to EXACT on-screen ratios on landscape and portrait`() {
+        // Verify every supported ratio, on both a landscape and a portrait image:
+        // the reshaped frame must display at exactly the selected ratio and its
+        // committed pixel crop must be exactly ratio too.
+        val images = listOf(Size(4000f, 3000f), Size(3000f, 4000f))
+        for (image in images) {
+            val full = Rect(0f, 0f, 1f, 1f)
+            for (selector in CropAspectRatio.entries) {
+                val ratio = selector.ratio ?: continue
+                val target = normalizedAspectRatio(ratio, image)
+                var frame = reshapeCropToRatio(full, target)
+                // On-screen (letterboxed) aspect is exactly the selected ratio.
+                assertEquals(
+                    "${selector.label} on $image", ratio, displayAspect(frame, image), 0.001f
+                )
+                // The committed pixel crop ratio equals the selected ratio.
+                assertEquals(
+                    "${selector.label} pixel crop on $image",
+                    ratio, (frame.width * image.width) / (frame.height * image.height), 0.001f
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `a selected ratio stays locked while dragging a corner`() {
+        val image = Size(4000f, 3000f)
+        val ratio = 1f
+        val target = normalizedAspectRatio(ratio, image)
+        var frame = reshapeCropToRatio(Rect(0f, 0f, 1f, 1f), target)
+        frame = dragCropRect(frame, CropDragMode.RESIZE_TOP_LEFT, dx = -0.1f, dy = 0.05f, ratio = target)
+        assertEquals("1:1 stays 1:1 while dragging an edge/corner", ratio, displayAspect(frame, image), 0.001f)
+        // And the pixel crop stays exactly ratio.
+        assertEquals(ratio, (frame.width * image.width) / (frame.height * image.height), 0.001f)
+    }
+
+    @Test
+    fun `a selected ratio stays locked while pinching`() {
+        val image = Size(3000f, 4000f)
+        val ratio = 16f / 9f
+        val target = normalizedAspectRatio(ratio, image)
+        var frame = reshapeCropToRatio(Rect(0.1f, 0.1f, 0.9f, 0.9f), target)
+        val pinch = scaleCropRect(frame, 1.3f, ratio = target)
+        assertEquals("16:9 stays locked while pinching", ratio, displayAspect(pinch, image), 0.001f)
+        assertEquals(ratio, (pinch.width * image.width) / (pinch.height * image.height), 0.001f)
+    }
+
+    @Test
+    fun `switching from one fixed ratio to ANOTHER takes the new ratio exactly, not a leftover`() {
+        val image = Size(4000f, 3000f)
+        // Landscape photo, 9:16 first → the frame becomes portrait (normalised
+        // 9/16·(H/W) = 0.4219), then 16:9 → the frame must be exactly 16:9 again.
+        var frame = reshapeCropToRatio(Rect(0f, 0f, 1f, 1f), normalizedAspectRatio(9f / 16f, image))
+        assertTrue("first selection is portrait", frame.width < frame.height)
+        frame = reshapeCropToRatio(frame, normalizedAspectRatio(16f / 9f, image))
+        assertEquals("9:16 then 16:9 ends exactly 16:9", 16f / 9f, displayAspect(frame, image), 0.001f)
+        assertEquals(16f / 9f, (frame.width * image.width) / (frame.height * image.height), 0.001f)
+        // And the reverse order: 16:9 first, then 9:16 → exactly 9:16.
+        var reverse = reshapeCropToRatio(Rect(0f, 0f, 1f, 1f), normalizedAspectRatio(16f / 9f, image))
+        assertTrue("first selection is landscape", reverse.width > reverse.height)
+        reverse = reshapeCropToRatio(reverse, normalizedAspectRatio(9f / 16f, image))
+        assertEquals("16:9 then 9:16 ends exactly 9:16", 9f / 16f, displayAspect(reverse, image), 0.001f)
+        assertEquals(9f / 16f, (reverse.width * image.width) / (reverse.height * image.height), 0.001f)
+    }
+
+    @Test
+    fun `switching ratios after a manual move resize keeps the selected ratio centred in the box`() {
+        val image = Size(4000f, 3000f)
+        // Manually moved/resized frame (offset from the full box): 0.68 x 0.55.
+        val moved = Rect(0.12f, 0.2f, 0.8f, 0.75f)
+        val switched = reshapeCropToRatio(moved, normalizedAspectRatio(4f / 3f, image))
+        assertEquals("switched ratio locks exactly 4:3", 4f / 3f, displayAspect(switched, image), 0.001f)
+        // The reshape PRESERVES the moved frame's area (0.68 x 0.55 = 0.374) at
+        // the new ratio instead of largest-fiting inside the moved bounds — so it
+        // may legitimately span wider/taller than the moved frame, and is clipped
+        // only to the normalized box, keeping the same centre.
+        assertEquals(
+            "the switch preserves the moved frame's area",
+            moved.width * moved.height, switched.width * switched.height, 0.001f
+        )
+        assertEquals("switch keeps the frame centred on the moved centre",
+            moved.center.x, switched.center.x, 0.001f)
+        assertEquals(moved.center.y, switched.center.y, 0.001f)
+        assertTrue(switched.left >= 0f && switched.top >= 0f && switched.right <= 1f && switched.bottom <= 1f)
+    }
+
+    @Test
+    fun `a pinch right after a ratio switch keeps the newly selected ratio`() {
+        val image = Size(4000f, 3000f)
+        var frame = reshapeCropToRatio(Rect(0f, 0f, 1f, 1f), normalizedAspectRatio(9f / 16f, image))
+        frame = reshapeCropToRatio(frame, normalizedAspectRatio(16f / 9f, image))
+        val pinched = scaleCropRect(frame, 1.6f, ratio = normalizedAspectRatio(16f / 9f, image))
+        assertEquals("pinch after the switch keeps 16:9", 16f / 9f, displayAspect(pinched, image), 0.001f)
+        assertEquals(16f / 9f, (pinched.width * image.width) / (pinched.height * image.height), 0.001f)
+    }
+
+    @Test
+    fun `reshape keeps the frame inside the box and actually reshapes`() {
+        val image = Size(4000f, 3000f)
+        val frame = reshapeCropToRatio(Rect(0f, 0f, 1f, 1f), normalizedAspectRatio(16f / 9f, image))
+        assertTrue(frame.left >= 0f && frame.top >= 0f && frame.right <= 1f && frame.bottom <= 1f)
+        assertEquals(16f / 9f, displayAspect(frame, image), 0.001f)
+        assertTrue("16:9 must change the full 4:3 frame", frame != Rect(0f, 0f, 1f, 1f))
+    }
+
+    // --- Area-preserving reshape (shrink-accumulation fix) -------------------
+    // Switching ratios must keep the frame's SCALE, not largest-fit inside the
+    // previous (already-reduced) frame — otherwise 1:1 → 4:3 → 1:1 → 4:3 keeps
+    // shrinking. Area preservation means returning to a ratio reproduces the
+    // very first selection's size exactly (when no axis overflows the box).
+
+    @Test
+    fun `alternating 1-1 and 4-3 on a landscape image round-trips without residual shrink`() {
+        val image = Size(4000f, 3000f)
+        // First 1:1 selection from the full 4:3 image: largest-fit → 0.75 x 1.
+        val first = reshapeCropToRatio(Rect(0f, 0f, 1f, 1f), normalizedAspectRatio(1f, image))
+        assertEquals(0.75f, first.width, 0.001f)
+        assertEquals(1f, first.height, 0.001f)
+        // Switch to 4:3 (normalised target on this image = 1) then BACK to 1:1:
+        // the area never changes, so the return equals the first selection — the
+        // alternating 1:1 → 4:3 → 1:1 loop that used to shrink every switch.
+        var frame = reshapeCropToRatio(first, normalizedAspectRatio(4f / 3f, image))
+        frame = reshapeCropToRatio(frame, normalizedAspectRatio(1f, image))
+        assertEquals("1:1 return equals the first selection's width",
+            first.width, frame.width, 0.001f)
+        assertEquals("1:1 return equals the first selection's height",
+            first.height, frame.height, 0.001f)
+        assertEquals("the 1:1 return stays exactly 1:1", 1f, displayAspect(frame, image), 0.001f)
+    }
+
+    @Test
+    fun `alternating 16-9 and 9-16 on a square image round-trips without residual shrink`() {
+        val image = Size(2000f, 2000f)
+        // First 16:9 selection on the square image: 1 x 9/16 (largest-fit).
+        val first = reshapeCropToRatio(Rect(0f, 0f, 1f, 1f), normalizedAspectRatio(16f / 9f, image))
+        assertEquals("16:9 first selection is strictly landscape", 1f, first.width, 0.001f)
+        assertEquals(9f / 16f, first.height, 0.001f)
+        // 16:9 → 9:16 → 16:9: both orientations FIT the square box at the
+        // preserved area, so returning reproduces the first selection exactly.
+        var frame = reshapeCropToRatio(first, normalizedAspectRatio(9f / 16f, image))
+        assertEquals("9:16 switch flips the frame to portrait", 9f / 16f, frame.width, 0.001f)
+        assertEquals(1f, frame.height, 0.001f)
+        frame = reshapeCropToRatio(frame, normalizedAspectRatio(16f / 9f, image))
+        assertEquals("16:9 return equals the first selection",
+            first.width, frame.width, 0.001f)
+        assertEquals(first.height, frame.height, 0.001f)
+        assertEquals("the 16:9 return stays exactly 16:9",
+            16f / 9f, displayAspect(frame, image), 0.001f)
+    }
+
+    @Test
+    fun `a ratio whose preserved area overflows a tall image clamps in-box keeping the exact ratio`() {
+        val image = Size(3000f, 4000f)
+        // 4:3 on the tall (3:4) image: normalised target 4/3·(4/3) = 16/9, whose
+        // sqrt(area·ratio) width (1.33 from the full box) overflows — the clamp
+        // caps width at 1 and derives the height, keeping [ratio] exact in-box.
+        val target = normalizedAspectRatio(4f / 3f, image)
+        val frame = reshapeCropToRatio(Rect(0f, 0f, 1f, 1f), target)
+        assertTrue(
+            "clamped frame stays in the normalized box",
+            frame.left >= 0f && frame.top >= 0f && frame.right <= 1f && frame.bottom <= 1f
+        )
+        assertEquals("the width-clamp yields width 1", 1f, frame.width, 0.001f)
+        assertEquals("4:3 stays exactly 4:3 on the tall image",
+            4f / 3f, displayAspect(frame, image), 0.001f)
+        assertEquals(4f / 3f, (frame.width * image.width) / (frame.height * image.height), 0.001f)
+    }
+
+    // --- crop-after-merge anchored to the CURRENT fold base ------------------
+
+    @Test
+    fun `crop overlay anchors to the merged base extent not the original image dims`() {
+        // The pristine photo the user loaded (what the overlay MUST NOT anchor to
+        // after a merge).
+        val originalImage = Size(1000f, 1000f)
+        // mergeLayers repoints the fold base to the merged result — larger here
+        // (e.g. after an enlarging merge). The crop overlay must span THIS.
+        val mergedBase = cropImageSize(Size(1600f, 1200f), rotationDegrees = 0f)
+        assertEquals("resolver reports the merged base dims", Size(1600f, 1200f), mergedBase)
+
+        // Letterbox the merged base into the crop box: 4:3 in a 900x900 box.
+        val fit = fitRect(Size(900f, 900f), mergedBase)
+        assertEquals(900f, fit.size.width, 0.001f)
+        assertEquals(675f, fit.size.height, 0.001f)
+        assertEquals(0f, fit.offset.x, 0.001f)
+        assertEquals((900f - 675f) / 2f, fit.offset.y, 0.001f)
+
+        // A full-frame crop normalized against the merged base rect spans the
+        // ENTIRE merged extent in-bounds — not clamped to a 1000x1000 original.
+        val full = Rect(0f, 0f, 1f, 1f)
+        val display = Rect(
+            left = fit.offset.x + full.left * fit.size.width,
+            top = fit.offset.y + full.top * fit.size.height,
+            right = fit.offset.x + full.right * fit.size.width,
+            bottom = fit.offset.y + full.bottom * fit.size.height
+        )
+        assertEquals("full-frame crop covers the whole box width", 0f, display.left, 0.001f)
+        assertEquals(900f, display.right, 0.001f)
+        assertEquals("full-frame crop covers the whole letterbox height", fit.offset.y, display.top, 0.001f)
+        assertEquals(fit.offset.y + fit.size.height, display.bottom, 0.001f)
+
+        // Contrast: anchoring to the old original dims would letterbox a 1:1
+        // into the same full square and would NOT span the merged (4:3) extent.
+        val oldFit = fitRect(Size(900f, 900f), originalImage)
+        assertTrue(
+            "merged-base letterbox is shorter than the original 1:1 fill",
+            fit.size.height < oldFit.size.height
+        )
+    }
 }

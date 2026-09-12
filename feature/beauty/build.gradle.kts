@@ -50,7 +50,6 @@ dependencies {
     implementation(libs.compose.material3)
     implementation(libs.compose.foundation)
     
-    implementation(libs.mlkit.face.detection)
     implementation(libs.mediapipe.tasks.vision)
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)

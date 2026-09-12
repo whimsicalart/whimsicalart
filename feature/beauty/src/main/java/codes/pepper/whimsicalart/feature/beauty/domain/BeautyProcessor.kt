@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PointF
 import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Region
@@ -15,6 +16,7 @@ import codes.pepper.whimsicalart.feature.beauty.detection.FaceDetectionResult
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 open class BeautyProcessor {
 
@@ -30,6 +32,7 @@ open class BeautyProcessor {
         intensity: Float = 0.7f,
         skinPath: Path? = null
     ): Bitmap {
+        if (intensity <= 0f) return bitmap
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
 
         faceResult.faces.forEach { face ->
@@ -97,9 +100,11 @@ open class BeautyProcessor {
         val mouthRight = face.landmarks.mouthRight
         // Per-pixel teeth-segmentation alpha mask: only bright tooth pixels inside
         // the mouth aperture are whitened, so gums/gloss stay put (a solid LIGHTEN
-        // over the whole geometric aperture used to lighten them too).
+        // over the whole geometric aperture used to lighten them too). The aperture
+        // is the Face Mesh inner-lip ring when available, falling back to the lens.
         val polygon = FeatureMaskBuilder.teethPolygon(
-            face.landmarks.lipsContour, mouthLeft, mouthRight
+            face.landmarks.lipsContour, mouthLeft, mouthRight,
+            face.landmarks.mouthApertureContour
         )
         val teethMask = TeethMaskProcessor.toothMask(bitmap, polygon)
         if (teethMask != null) {
@@ -116,6 +121,7 @@ open class BeautyProcessor {
         intensity: Float,
         skinPath: Path? = null
     ): Bitmap {
+        if (intensity <= 0f) return bitmap
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(result)
         val paint = Paint().apply {
@@ -219,6 +225,7 @@ open class BeautyProcessor {
         faceResult: FaceDetectionResult,
         intensity: Float
     ): Bitmap {
+        if (intensity <= 0f) return bitmap
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
 
         faceResult.faces.forEach { face ->
@@ -233,6 +240,7 @@ open class BeautyProcessor {
         faceResult: FaceDetectionResult,
         intensity: Float
     ): Bitmap {
+        if (intensity <= 0f) return bitmap
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
 
         faceResult.faces.forEach { face ->
@@ -242,31 +250,69 @@ open class BeautyProcessor {
         return result
     }
 
+    /**
+     * The beauty pen's manual brightness/colour brush. Strokes carry NORMALIZED
+     * positions (source fractions) and a width fraction, exactly like the
+     * standalone pen, so a stroke bakes identically at committed full-res and at
+     * preview resolution regardless of the layer's running bitmap dims.
+     * Each point stamps a hard circle of the picked [color] added (dodge) to the
+     * underlying pixels: dark regions move toward the picked colour and bright
+     * regions clip toward white. [brightness] drives the alpha. A per-pixel CPU
+     * pass (like the mosaic/blur brush stamps) so it stays unit-testable under
+     * Robolectric's software canvas.
+     */
     fun applyBrightnessPen(
         bitmap: Bitmap,
         strokes: List<BrushStroke>,
-        brightness: Float = 1f
+        brightness: Float = 1f,
+        color: Int = android.graphics.Color.WHITE
     ): Bitmap {
+        if (brightness <= 0f || strokes.isEmpty()) return bitmap
+        val w = bitmap.width
+        val h = bitmap.height
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
-        if (strokes.isEmpty()) return result
-        val canvas = Canvas(result)
-        val paint = Paint().apply {
-            isAntiAlias = true
-            color = Color.argb(
-                (125f * brightness).toInt().coerceIn(0, 255),
-                255, 255, 255
-            )
-            xfermode = android.graphics.PorterDuffXfermode(
-                android.graphics.PorterDuff.Mode.ADD
-            )
-        }
+        val fade = (125f * brightness).coerceIn(0f, 255f) / 255f
+        val addR = (Color.red(color) * fade).toInt().coerceIn(0, 255)
+        val addG = (Color.green(color) * fade).toInt().coerceIn(0, 255)
+        val addB = (Color.blue(color) * fade).toInt().coerceIn(0, 255)
+        var scratch = IntArray(0)
 
-        strokes.forEach { stroke ->
-            stroke.points.forEach { point ->
-                canvas.drawCircle(point.x, point.y, stroke.size, paint)
+        for (stroke in strokes) {
+            val radiusPx = (stroke.size * w / 2f).coerceAtLeast(1f)
+            val r = kotlin.math.ceil(radiusPx).toInt()
+            val radiusSq = radiusPx * radiusPx
+            for (point in stroke.points) {
+                val cx = (point.x * w).roundToInt()
+                val cy = (point.y * h).roundToInt()
+                val left = (cx - r).coerceAtLeast(0)
+                val top = (cy - r).coerceAtLeast(0)
+                val right = (cx + r).coerceAtMost(w - 1)
+                val bottom = (cy + r).coerceAtMost(h - 1)
+                val bw = right - left + 1
+                val bh = bottom - top + 1
+                if (bw <= 0 || bh <= 0) continue
+                if (scratch.size < bw * bh) scratch = IntArray(bw * bh)
+                result.getPixels(scratch, 0, bw, left, top, bw, bh)
+                for (yy in top..bottom) {
+                    val dy = yy - cy
+                    var idx = (yy - top) * bw
+                    for (xx in left..right) {
+                        val dx = xx - cx
+                        if (dx * dx + dy * dy <= radiusSq) {
+                            val d = scratch[idx]
+                            scratch[idx] = Color.argb(
+                                Color.alpha(d),
+                                (Color.red(d) + addR).coerceAtMost(255),
+                                (Color.green(d) + addG).coerceAtMost(255),
+                                (Color.blue(d) + addB).coerceAtMost(255)
+                            )
+                        }
+                        idx++
+                    }
+                }
+                result.setPixels(scratch, 0, bw, left, top, bw, bh)
             }
         }
-
         return result
     }
 
@@ -314,7 +360,7 @@ open class BeautyProcessor {
         color: Int,
         intensity: Float
     ): Bitmap {
-        if (intensity <= 0f) return bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        if (intensity <= 0f) return bitmap
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(result)
         val paint = overlayPaint(color, intensity)
@@ -322,7 +368,10 @@ open class BeautyProcessor {
         faceResult.faces.forEach { face ->
             val left = face.landmarks.mouthLeft
             val right = face.landmarks.mouthRight
-            FeatureMaskBuilder.lipMask(face.landmarks.lipsContour, left, right)
+            FeatureMaskBuilder.lipMask(
+                face.landmarks.lipsContour, left, right,
+                face.landmarks.mouthApertureContour
+            )
                 ?.let { lipPath ->
                     MaskedEffectRenderer.drawFeatheredMask(
                         canvas, lipPath, paint.color, paint.xfermode
@@ -338,7 +387,7 @@ open class BeautyProcessor {
         color: Int,
         intensity: Float
     ): Bitmap {
-        if (intensity <= 0f) return bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        if (intensity <= 0f) return bitmap
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(result)
         val paint = overlayPaint(color, intensity)
@@ -369,7 +418,7 @@ open class BeautyProcessor {
         color: Int,
         intensity: Float
     ): Bitmap {
-        if (intensity <= 0f) return bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        if (intensity <= 0f) return bitmap
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(result)
         val paint = overlayPaint(color, intensity)
@@ -395,7 +444,7 @@ open class BeautyProcessor {
         color: Int,
         intensity: Float
     ): Bitmap {
-        if (intensity <= 0f) return bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        if (intensity <= 0f) return bitmap
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(result)
         val paint = overlayPaint(color, intensity)
@@ -424,7 +473,7 @@ open class BeautyProcessor {
         intensity: Float,
         skinPath: Path? = null
     ): Bitmap {
-        if (intensity <= 0f) return bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        if (intensity <= 0f) return bitmap
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(result)
         val paint = overlayPaint(color, intensity)
@@ -464,7 +513,7 @@ open class BeautyProcessor {
         intensity: Float,
         hairPath: Path? = null
     ): Bitmap {
-        if (intensity <= 0f) return bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        if (intensity <= 0f) return bitmap
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(result)
         val paint = overlayPaint(color, intensity)
@@ -493,7 +542,7 @@ open class BeautyProcessor {
         faceResult: FaceDetectionResult,
         faceSlim: Float
     ): Bitmap {
-        if (faceSlim == 0f) return bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        if (faceSlim == 0f) return bitmap
         val width = bitmap.width
         val height = bitmap.height
         val verts = baseMesh(width, height)
@@ -522,7 +571,7 @@ open class BeautyProcessor {
         faceResult: FaceDetectionResult,
         jawAdjust: Float
     ): Bitmap {
-        if (jawAdjust == 0f) return bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        if (jawAdjust == 0f) return bitmap
         val width = bitmap.width
         val height = bitmap.height
         val verts = baseMesh(width, height)
@@ -551,7 +600,7 @@ open class BeautyProcessor {
         faceResult: FaceDetectionResult,
         eyeEnlarge: Float
     ): Bitmap {
-        if (eyeEnlarge == 0f) return bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        if (eyeEnlarge == 0f) return bitmap
         val width = bitmap.width
         val height = bitmap.height
         val verts = baseMesh(width, height)
@@ -581,7 +630,7 @@ open class BeautyProcessor {
         faceResult: FaceDetectionResult,
         noseAdjust: Float
     ): Bitmap {
-        if (noseAdjust == 0f) return bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        if (noseAdjust == 0f) return bitmap
         val width = bitmap.width
         val height = bitmap.height
         val verts = baseMesh(width, height)
@@ -657,11 +706,30 @@ open class BeautyProcessor {
         return kotlin.math.hypot(dx.toDouble(), dy.toDouble()).toFloat()
     }
 
+    /**
+     * Pixels the dark-circle silkworm must drop below the eye ANCHOR so its
+     * flat top edge starts at/under the LOWER lash instead of overlapping the
+     * eye: the eye landmark sits on/near the outer corner (the contour's first
+     * point), roughly halfway up the eye, so the drop is the anchor-to-lowest
+     * eye-contour distance plus a small margin. Without an eye contour the
+     * anchor is already the raw eye centre and the shift is 0 (the silkworm
+     * keeps its built-in grazing offset) - same as the pre-bugfix fallback.
+     * `internal` for tests.
+     */
+    internal fun eyeDropToLash(eye: PointF, eyeContour: List<PointF>): Float {
+        if (eyeContour.size < 3) return 0f
+        val lowest = eyeContour.maxOf { it.y }
+        if (lowest <= eye.y) return 0f
+        val eyeHeight = lowest - eyeContour.minOf { it.y }
+        return lowest - eye.y + eyeHeight * 0.1f
+    }
+
     fun applyDarkCircleRemoval(
         bitmap: Bitmap,
         faceResult: FaceDetectionResult,
         intensity: Float
     ): Bitmap {
+        if (intensity <= 0f) return bitmap
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
         faceResult.faces.forEach { face ->
             val canvas = Canvas(result)
@@ -677,12 +745,20 @@ open class BeautyProcessor {
             }
             // Silkworm (under-eye crescent) region rather than a circle: wider
             // than tall, its top edge grazing the lash line and dipping below
-            // the eye - the actual dark-circle zone.
+            // the eye - the actual dark-circle zone. The crescent is dropped to
+            // the lower lash (a fraction of the eye's own height below the eye
+            // anchor) so it lands on the hollow instead of overlapping the eye
+            // and lower lid.
             val width = face.bounds.width() * 0.42f
             val height = width * 0.6f
-            listOfNotNull(face.landmarks.leftEye, face.landmarks.rightEye).forEach { eye ->
-                val path = FeatureMaskBuilder.silkwormPath(eye.x, eye.y, width, height)
-                paint.applyRadialFalloff(eye.x, eye.y + height * 0.6f, width / 2f)
+            listOf(
+                face.landmarks.leftEye to face.landmarks.leftEyeContour,
+                face.landmarks.rightEye to face.landmarks.rightEyeContour
+            ).forEach { (eye, contour) ->
+                if (eye == null) return@forEach
+                val drop = eyeDropToLash(eye, contour)
+                val path = FeatureMaskBuilder.silkwormPath(eye.x, eye.y + drop, width, height)
+                paint.applyRadialFalloff(eye.x, eye.y + drop + height * 0.6f, width / 2f)
                 canvas.drawPath(path, paint)
             }
             paint.shader = null
@@ -690,15 +766,36 @@ open class BeautyProcessor {
         return result
     }
 
+    /**
+     * Dimension-agnostic smoothing reach for [applySpotRemoval]: a fraction of
+     * the live image's short edge (≈ the historical `3 + 5·intensity` px at a
+     * 500px short edge), so a preview and the full-size fold soften the same
+     * relative reach. `internal` for tests.
+     */
+    internal fun spotRemovalRadius(shortEdge: Int, intensity: Float): Int =
+        (shortEdge * (3f + 5f * intensity) / 500f).roundToInt().coerceAtLeast(1)
+
+    /**
+     * Dimension-agnostic smoothing reach for [applyWrinkleRemoval] (see
+     * [spotRemovalRadius]): ≈ `6 + 10·intensity` px at a 500px short edge.
+     * `internal` for tests.
+     */
+    internal fun wrinkleRemovalRadius(shortEdge: Int, intensity: Float): Int =
+        (shortEdge * (6f + 10f * intensity) / 500f).roundToInt().coerceAtLeast(1)
+
     fun applySpotRemoval(
         bitmap: Bitmap,
         faceResult: FaceDetectionResult,
         intensity: Float,
         skinPath: Path? = null
     ): Bitmap {
-        if (intensity <= 0f) return bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        if (intensity <= 0f) return bitmap
+        if (faceResult.faces.isEmpty()) return bitmap
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
-        val radius = (3 + 5 * intensity).toInt().coerceIn(1, 12)
+        // One effect, two scales: the smoothing band is a fraction of the live
+        // image (≈ the historical 3 + 5·intensity px at a 500px short edge), so
+        // a preview and the full-size fold soften the same relative reach.
+        val radius = spotRemovalRadius(minOf(bitmap.width, bitmap.height), intensity)
         val blurred = boxBlur(result, radius)
 
         faceResult.faces.forEach { face ->
@@ -727,9 +824,13 @@ open class BeautyProcessor {
         faceResult: FaceDetectionResult,
         intensity: Float
     ): Bitmap {
-        if (intensity <= 0f) return bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        if (intensity <= 0f) return bitmap
+        if (faceResult.faces.isEmpty()) return bitmap
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
-        val radius = (6 + 10 * intensity).toInt().coerceIn(2, 20)
+        // One effect, two scales (see applySpotRemoval): the wrinkle band is a
+        // fraction of the live image (≈ the historical 6 + 10·intensity px at a
+        // 500px short edge).
+        val radius = wrinkleRemovalRadius(minOf(bitmap.width, bitmap.height), intensity)
         val blurred = boxBlur(result, radius)
 
         faceResult.faces.forEach { face ->
@@ -775,7 +876,7 @@ open class BeautyProcessor {
         skinPath: Path? = null
     ): Bitmap {
         val t = intensity.coerceIn(-1f, 1f)
-        if (t == 0f) return bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        if (t == 0f) return bitmap
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
 
         val alpha = (Math.abs(t.toDouble()) * 160).toInt().coerceIn(0, 255)
@@ -811,13 +912,25 @@ open class BeautyProcessor {
         val width = bitmap.width
         val height = bitmap.height
         val src = IntArray(width * height)
-        val tmp = IntArray(width * height)
-        bitmap.getPixels(tmp, 0, width, 0, 0, width, height)
+        bitmap.getPixels(src, 0, width, 0, 0, width, height)
+        return Bitmap.createBitmap(
+            boxBlurPixels(src, width, height, radius),
+            width, height, Bitmap.Config.ARGB_8888
+        )
+    }
 
-        blurHorizontal(tmp, src, width, height, radius)
-        blurVertical(src, tmp, width, height, radius)
-
-        return Bitmap.createBitmap(tmp, width, height, Bitmap.Config.ARGB_8888)
+    /**
+     * Separable box blur over a row-major ARGB array (horizontal then vertical
+     * pass, non-premultiplied — each channel is averaged independently). The
+     * sliding-window passes are integer-exact to the prior per-pixel re-sum;
+     * `internal` for the parity test (mirrors MaskedEffectRenderer.boxBlurPixels).
+     */
+    internal fun boxBlurPixels(src: IntArray, w: Int, h: Int, radius: Int): IntArray {
+        val horizontal = IntArray(w * h)
+        blurHorizontal(src, horizontal, w, h, radius)
+        val result = IntArray(w * h)
+        blurVertical(horizontal, result, w, h, radius)
+        return result
     }
 
     private fun blurHorizontal(
@@ -827,24 +940,46 @@ open class BeautyProcessor {
         height: Int,
         radius: Int
     ) {
+        // Classic incremental window instead of re-summing the 2r+1 window from
+        // scratch per pixel (O(w·h·r); r reaches ~25-64 for full-res
+        // spot/wrinkle 8MP folds) — the window slides one column at a time:
+        // add the entering pixel, subtract the leaving one. Same clamped
+        // left/right edges and the same count ⇒ integer-exact, O(w·h).
         for (y in 0 until height) {
             val rowBase = y * width
+            var count = 0L
+            var a = 0L
+            var r = 0L
+            var g = 0L
+            var b = 0L
+            for (i in 0..minOf(radius, width - 1)) {
+                val c = src[rowBase + i]
+                a += c ushr 24 and 0xff
+                r += c ushr 16 and 0xff
+                g += c ushr 8 and 0xff
+                b += c and 0xff
+                count++
+            }
             for (x in 0 until width) {
-                val left = (x - radius).coerceAtLeast(0)
-                val right = (x + radius).coerceAtMost(width - 1)
-                val count = (right - left + 1).toLong()
-                var a = 0L
-                var r = 0L
-                var g = 0L
-                var b = 0L
-                for (i in left..right) {
-                    val c = src[rowBase + i]
+                dst[rowBase + x] = intColor(a, r, g, b, count)
+                val removeIdx = x - radius
+                if (removeIdx >= 0) {
+                    val c = src[rowBase + removeIdx]
+                    a -= c ushr 24 and 0xff
+                    r -= c ushr 16 and 0xff
+                    g -= c ushr 8 and 0xff
+                    b -= c and 0xff
+                    count--
+                }
+                val addIdx = x + radius + 1
+                if (addIdx < width) {
+                    val c = src[rowBase + addIdx]
                     a += c ushr 24 and 0xff
                     r += c ushr 16 and 0xff
                     g += c ushr 8 and 0xff
                     b += c and 0xff
+                    count++
                 }
-                dst[rowBase + x] = intColor(a, r, g, b, count)
             }
         }
     }
@@ -856,23 +991,41 @@ open class BeautyProcessor {
         height: Int,
         radius: Int
     ) {
+        // Same sliding-window trick as blurHorizontal, along the column axis.
         for (x in 0 until width) {
+            var count = 0L
+            var a = 0L
+            var r = 0L
+            var g = 0L
+            var b = 0L
+            for (i in 0..minOf(radius, height - 1)) {
+                val c = src[i * width + x]
+                a += c ushr 24 and 0xff
+                r += c ushr 16 and 0xff
+                g += c ushr 8 and 0xff
+                b += c and 0xff
+                count++
+            }
             for (y in 0 until height) {
-                val top = (y - radius).coerceAtLeast(0)
-                val bottom = (y + radius).coerceAtMost(height - 1)
-                val count = (bottom - top + 1).toLong()
-                var a = 0L
-                var r = 0L
-                var g = 0L
-                var b = 0L
-                for (i in top..bottom) {
-                    val c = src[i * width + x]
+                dst[y * width + x] = intColor(a, r, g, b, count)
+                val removeIdx = y - radius
+                if (removeIdx >= 0) {
+                    val c = src[removeIdx * width + x]
+                    a -= c ushr 24 and 0xff
+                    r -= c ushr 16 and 0xff
+                    g -= c ushr 8 and 0xff
+                    b -= c and 0xff
+                    count--
+                }
+                val addIdx = y + radius + 1
+                if (addIdx < height) {
+                    val c = src[addIdx * width + x]
                     a += c ushr 24 and 0xff
                     r += c ushr 16 and 0xff
                     g += c ushr 8 and 0xff
                     b += c and 0xff
+                    count++
                 }
-                dst[y * width + x] = intColor(a, r, g, b, count)
             }
         }
     }

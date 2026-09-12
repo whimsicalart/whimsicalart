@@ -1,6 +1,7 @@
 package codes.pepper.whimsicalart.feature.beauty.detection
 
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.Path
 import android.graphics.PointF
 
@@ -27,14 +28,19 @@ object SkinMaskProcessor {
     ): Path? {
         val width = mask.width
         val height = mask.height
+        // One batched read of the mask: the scan below indexes `y*w+x` instead
+        // of hitting `getPixel` once per pixel (up to 4M JNI calls at the ML cap).
+        val pixels = IntArray(width * height)
+        mask.getPixels(pixels, 0, width, 0, 0, width, height)
         val leftEdge = ArrayList<PointF>(height / stride)
         val rightEdge = ArrayList<PointF>(height / stride)
 
         for (y in 0 until height step stride) {
             var left = -1
             var right = -1
+            val row = y * width
             for (x in 0 until width) {
-                if (android.graphics.Color.alpha(mask.getPixel(x, y)) >= threshold) {
+                if (Color.alpha(pixels[row + x]) >= threshold) {
                     if (left < 0) left = x
                     right = x
                 }

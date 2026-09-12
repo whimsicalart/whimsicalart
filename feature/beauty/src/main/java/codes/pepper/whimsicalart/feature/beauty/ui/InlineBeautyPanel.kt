@@ -1,11 +1,7 @@
 package codes.pepper.whimsicalart.feature.beauty.ui
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,10 +9,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
@@ -26,9 +20,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.dp
+import codes.pepper.whimsicalart.core.designsystem.ColourPresetRow
+import codes.pepper.whimsicalart.core.designsystem.LocalUiScale
 
 /**
  * Beauty sub-tool controls hosted in the editor's bottom control panel — the
@@ -122,6 +118,10 @@ fun BeautyControls(
                 onValueChange = { onChange(params.copy(jaw = it)) }
             )
             BeautyTool.BRIGHTNESS_PEN -> {
+                ColorPicker(
+                    selectedColor = params.penColor,
+                    onColorSelected = { onChange(params.copy(penColor = it)) }
+                )
                 BeautySlider(
                     label = "Brush Size",
                     value = params.brushSize,
@@ -136,18 +136,33 @@ fun BeautyControls(
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp * LocalUiScale.current)
                 ) {
+                    val s = LocalUiScale.current
                     TextButton(
                         onClick = {
                             if (params.brushStrokes.isNotEmpty()) {
                                 onChange(params.copy(brushStrokes = params.brushStrokes.dropLast(1)))
                             }
                         }
-                    ) { Text("Undo") }
+                    ) {
+                        Text(
+                            text = "Undo",
+                            style = MaterialTheme.typography.labelLarge.copy(
+                                fontSize = MaterialTheme.typography.labelLarge.fontSize * s
+                            )
+                        )
+                    }
                     TextButton(
                         onClick = { onChange(params.copy(brushStrokes = emptyList(), activeStroke = null)) }
-                    ) { Text("Clear") }
+                    ) {
+                        Text(
+                            text = "Clear",
+                            style = MaterialTheme.typography.labelLarge.copy(
+                                fontSize = MaterialTheme.typography.labelLarge.fontSize * s
+                            )
+                        )
+                    }
                 }
             }
             BeautyTool.LIPSTICK,
@@ -156,9 +171,30 @@ fun BeautyControls(
             BeautyTool.EYELINER,
             BeautyTool.FOUNDATION,
             BeautyTool.HAIR_COLOR -> {
+                // The active sub-tool's OWN colour slot: sharing one field here is
+                // what leaked a Lipstick pick into the Blush/Eye Shadow selection
+                // (docs/effects_reference.md → Beauty → Quirks).
+                val colorValue = when (selectedTool) {
+                    BeautyTool.LIPSTICK -> params.lipstickColor
+                    BeautyTool.BLUSH -> params.blushColor
+                    BeautyTool.EYE_SHADOW -> params.eyeShadowColor
+                    BeautyTool.EYELINER -> params.eyelinerColor
+                    BeautyTool.FOUNDATION -> params.foundationColor
+                    BeautyTool.HAIR_COLOR -> params.hairColor
+                    else -> 0
+                }
+                val colorUpdate: (Int) -> Unit = when (selectedTool) {
+                    BeautyTool.LIPSTICK -> { c -> onChange(params.copy(lipstickColor = c)) }
+                    BeautyTool.BLUSH -> { c -> onChange(params.copy(blushColor = c)) }
+                    BeautyTool.EYE_SHADOW -> { c -> onChange(params.copy(eyeShadowColor = c)) }
+                    BeautyTool.EYELINER -> { c -> onChange(params.copy(eyelinerColor = c)) }
+                    BeautyTool.FOUNDATION -> { c -> onChange(params.copy(foundationColor = c)) }
+                    BeautyTool.HAIR_COLOR -> { c -> onChange(params.copy(hairColor = c)) }
+                    else -> { _: Int -> }
+                }
                 ColorPicker(
-                    selectedColor = params.makeupColor,
-                    onColorSelected = { onChange(params.copy(makeupColor = it)) }
+                    selectedColor = colorValue,
+                    onColorSelected = colorUpdate
                 )
                 val label = when (selectedTool) {
                     BeautyTool.LIPSTICK -> "Lipstick"
@@ -200,12 +236,13 @@ private fun BeautyToolbar(
     onToolSelected: (BeautyTool?) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val s = LocalUiScale.current
     Row(
         modifier = modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+            .padding(horizontal = 16.dp * s, vertical = 8.dp * s),
+        horizontalArrangement = Arrangement.spacedBy(8.dp * s)
     ) {
         BeautyTool.entries.forEach { tool ->
             FilterChip(
@@ -234,10 +271,12 @@ private fun BeautyToolbar(
                             BeautyTool.FOUNDATION -> "Base"
                             BeautyTool.HAIR_COLOR -> "Hair"
                         },
-                        style = MaterialTheme.typography.labelMedium
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontSize = MaterialTheme.typography.labelMedium.fontSize * s
+                        )
                     )
                 },
-                modifier = Modifier.heightIn(min = 48.dp),
+                modifier = Modifier.heightIn(min = (48.dp * s).coerceAtLeast(32.dp)),
                 colors = FilterChipDefaults.filterChipColors(
                     selectedContainerColor = MaterialTheme.colorScheme.primary,
                     selectedLabelColor = MaterialTheme.colorScheme.onPrimary
@@ -253,29 +292,17 @@ private fun ColorPicker(
     onColorSelected: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Row(
+    // The SHARED picker (core.designsystem): one compact row of the common makeup
+    // colours with a rainbow circle as the last cell, opening the full picker
+    // popup (documented under *Shared business rules → Colour picker*). Alpha is
+    // hidden: makeup/pen colour is carried opaque, the pen has its own opacity.
+    ColourPresetRow(
+        selected = Color(selectedColor),
+        onColorChange = { onColorSelected(it.toArgb()) },
+        swatches = MakeupPalette.colors,
+        showAlpha = false,
         modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        MakeupPalette.colors.forEach { color ->
-            val isSelected = selectedColor == color
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(Color(color))
-                    .border(
-                        width = if (isSelected) 3.dp else 1.dp,
-                        color = if (isSelected) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.outline,
-                        shape = CircleShape
-                    )
-                    .clickable { onColorSelected(color) }
-            )
-        }
-    }
+    )
 }
 
 @Composable
@@ -289,10 +316,11 @@ private fun BeautySlider(
 ) {
     // Styled to mirror the editor's AdjustmentSlider so beauty sub-tools match
     // the padding / font sizes / slider sizing of every other edit tool.
+    val s = LocalUiScale.current
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .padding(horizontal = 16.dp * s, vertical = 8.dp * s)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -300,24 +328,28 @@ private fun BeautySlider(
         ) {
             Text(
                 text = label,
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize = MaterialTheme.typography.bodyMedium.fontSize * s
+                ),
                 modifier = Modifier.weight(1f)
             )
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(8.dp * s))
             Text(
                 text = if (isPercent) "${(value * 100).toInt()}%" else value.toInt().toString(),
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontSize = MaterialTheme.typography.bodySmall.fontSize * s
+                ),
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        Spacer(modifier = Modifier.height(4.dp))
+        Spacer(modifier = Modifier.height((4.dp * s).coerceAtLeast(2.dp)))
         Slider(
             value = value,
             onValueChange = onValueChange,
             valueRange = valueRange,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp)
+                .padding(horizontal = 12.dp * s)
         )
     }
 }

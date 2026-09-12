@@ -12,6 +12,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import codes.pepper.whimsicalart.core.designsystem.LocalUiScale
 
 @Composable
 fun AspectRatioSelector(
@@ -20,11 +21,12 @@ fun AspectRatioSelector(
     modifier: Modifier = Modifier,
     enabled: Boolean = true
 ) {
+    val s = LocalUiScale.current
     Row(
         modifier = modifier
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 8.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+            .padding(horizontal = 8.dp * s, vertical = 8.dp * s),
+        horizontalArrangement = Arrangement.spacedBy(8.dp * s)
     ) {
         CropAspectRatio.entries.forEach { aspectRatio ->
             FilterChip(
@@ -34,7 +36,9 @@ fun AspectRatioSelector(
                 label = {
                     Text(
                         text = aspectRatio.label,
-                        style = MaterialTheme.typography.labelMedium
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontSize = MaterialTheme.typography.labelMedium.fontSize * s
+                        )
                     )
                 },
                 colors = FilterChipDefaults.filterChipColors(

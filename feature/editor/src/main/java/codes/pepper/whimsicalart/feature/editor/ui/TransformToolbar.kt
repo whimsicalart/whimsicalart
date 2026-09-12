@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Flip
 import androidx.compose.material.icons.filled.RotateLeft
@@ -22,6 +23,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
+import codes.pepper.whimsicalart.core.designsystem.LocalUiScale
 
 enum class TransformTool {
     ROTATE_LEFT,
@@ -37,16 +39,20 @@ fun TransformToolbar(
     onFlip: (TransformTool) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val s = LocalUiScale.current
+    val iconButtonSize = (48.dp * s).coerceAtLeast(40.dp)
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .padding(horizontal = 16.dp * s, vertical = 8.dp * s)
     ) {
         Text(
             text = "free rotate",
-            style = MaterialTheme.typography.labelMedium,
+            style = MaterialTheme.typography.labelMedium.copy(
+                fontSize = MaterialTheme.typography.labelMedium.fontSize * s
+            ),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(bottom = 4.dp)
+            modifier = Modifier.padding(bottom = 4.dp * s)
         )
         Slider(
             value = rotation,
@@ -60,7 +66,9 @@ fun TransformToolbar(
         ) {
             Text(
                 text = "${rotation.roundToInt()}°",
-                style = MaterialTheme.typography.labelMedium,
+                style = MaterialTheme.typography.labelMedium.copy(
+                    fontSize = MaterialTheme.typography.labelMedium.fontSize * s
+                ),
                 fontWeight = FontWeight.SemiBold,
                 textAlign = TextAlign.Center
             )
@@ -70,32 +78,48 @@ fun TransformToolbar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 16.dp),
+                .padding(top = 16.dp * s),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = { onRotationChanged(normalize(rotation - 90f)) }) {
+            IconButton(
+                onClick = { onRotationChanged(normalize(rotation - 90f)) },
+                modifier = Modifier.size(iconButtonSize)
+            ) {
                 Icon(
                     imageVector = Icons.Default.RotateLeft,
-                    contentDescription = "Rotate Left (90°)"
+                    contentDescription = "Rotate Left (90°)",
+                    modifier = Modifier.size(24.dp * s)
                 )
             }
-            IconButton(onClick = { onRotationChanged(normalize(rotation + 90f)) }) {
+            IconButton(
+                onClick = { onRotationChanged(normalize(rotation + 90f)) },
+                modifier = Modifier.size(iconButtonSize)
+            ) {
                 Icon(
                     imageVector = Icons.Default.RotateRight,
-                    contentDescription = "Rotate Right (90°)"
+                    contentDescription = "Rotate Right (90°)",
+                    modifier = Modifier.size(24.dp * s)
                 )
             }
-            IconButton(onClick = { onFlip(TransformTool.FLIP_HORIZONTAL) }) {
+            IconButton(
+                onClick = { onFlip(TransformTool.FLIP_HORIZONTAL) },
+                modifier = Modifier.size(iconButtonSize)
+            ) {
                 Icon(
                     imageVector = Icons.Default.Flip,
-                    contentDescription = "Flip Horizontal"
+                    contentDescription = "Flip Horizontal",
+                    modifier = Modifier.size(24.dp * s)
                 )
             }
-            IconButton(onClick = { onFlip(TransformTool.FLIP_VERTICAL) }) {
+            IconButton(
+                onClick = { onFlip(TransformTool.FLIP_VERTICAL) },
+                modifier = Modifier.size(iconButtonSize)
+            ) {
                 Icon(
                     imageVector = Icons.Default.SwapVert,
-                    contentDescription = "Flip Vertical"
+                    contentDescription = "Flip Vertical",
+                    modifier = Modifier.size(24.dp * s)
                 )
             }
         }

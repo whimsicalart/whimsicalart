@@ -5,6 +5,7 @@ import android.graphics.Rect
 import android.graphics.RectF
 import codes.pepper.whimsicalart.feature.beauty.domain.FeatureMaskBuilder
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -22,6 +23,37 @@ class FeatureMaskBuilderTest {
             PointF(cx + half, cy + half),
             PointF(cx - half, cy + half)
         )
+
+    /**
+     * Simulated MediaPipe inner-lip ring: an almond-shaped closed loop with the
+     * given aperture width/height (upper + lower lip curves meeting at the
+     * corners), approximating the mouth opening the mapper extracts.
+     */
+    private fun InnerLipRing(
+        cx: Float,
+        cy: Float,
+        halfWidth: Float,
+        halfHeight: Float
+    ): List<PointF> {
+        val pts = ArrayList<PointF>()
+        // Upper curve, left corner → right corner (mirrors lipsUpperInner order).
+        val upperSteps = 6
+        for (i in 0..upperSteps) {
+            val t = i.toFloat() / upperSteps
+            val x = cx - halfWidth + 2 * halfWidth * t
+            val y = cy - halfHeight * (1 - (1 - (2 * t - 1).let { it * it }))
+            pts.add(PointF(x, y))
+        }
+        // Lower curve, right corner → left corner (mirrors lipsLowerInner order).
+        val lowerSteps = 6
+        for (i in 1 until lowerSteps) {
+            val t = i.toFloat() / lowerSteps
+            val x = cx + halfWidth - 2 * halfWidth * t
+            val y = cy + halfHeight * (1 - (1 - (2 * t - 1).let { it * it }))
+            pts.add(PointF(x, y))
+        }
+        return pts
+    }
 
     private fun bounds(path: android.graphics.Path): RectF {
         val out = RectF()
@@ -88,6 +120,59 @@ class FeatureMaskBuilderTest {
     }
 
     @Test
+    fun `lipMask punches the mouth aperture out of the lip fill when the mouth is open`() {
+        val lips = square(200f, 300f, 40f)
+        val aperture = InnerLipRing(200f, 300f, halfWidth = 20f, halfHeight = 12f)
+        val path = FeatureMaskBuilder.lipMask(lips, null, null, aperture)!!
+        assertEquals(
+            "a real opening becomes an even-odd hole so the teeth stay untinted",
+            android.graphics.Path.FillType.EVEN_ODD, path.fillType
+        )
+        assertTrue("cover the whole mouth line", bounds(path).top <= 300f && bounds(path).bottom >= 300f)
+    }
+
+    @Test
+    fun `lipMask keeps the full lip fill for a pressed-together mouth`() {
+        val lips = square(200f, 300f, 40f)
+        // Near-degenerate aperture (2px tall over a 40px-wide mouth, ~5% of the
+        // width) is the collapsed inner-lip ring of closed lips — no hole is
+        // punched, otherwise lipstick would leave an uncoloured seam.
+        val aperture = InnerLipRing(200f, 300f, halfWidth = 20f, halfHeight = 1f)
+        val path = FeatureMaskBuilder.lipMask(lips, null, null, aperture)!!
+        assertEquals(
+            "closed mouth keeps the single winding fill",
+            android.graphics.Path.FillType.WINDING, path.fillType
+        )
+    }
+
+    @Test
+    fun `lipMask fallback with an open aperture also punches the hole`() {
+        val aperture = InnerLipRing(200f, 280f, halfWidth = 20f, halfHeight = 12f)
+        val path = FeatureMaskBuilder.lipMask(emptyList(), PointF(170f, 280f), PointF(230f, 280f), aperture)!!
+        assertEquals(android.graphics.Path.FillType.EVEN_ODD, path.fillType)
+    }
+
+    @Test
+    fun `isMouthOpen only when the inner ring has real vertical extent`() {
+        // The lipstick aperture hole must not fire for a pressed-together mouth:
+        // only a ring whose bbox height is at least 10% of its width is a real
+        // opening. (The InnerLipRing helper's bbox is asymmetric 1.44*halfHeight,
+        // so these use explicit quadrilaterals to pin the exact threshold.)
+        fun ring(ofH: Float) = listOf(
+            PointF(0f, 0f),
+            PointF(100f, 0f),
+            PointF(100f, ofH),
+            PointF(0f, ofH)
+        )
+        assertTrue(FeatureMaskBuilder.isMouthOpen(ring(30f)))
+        assertTrue("borderline at exactly 10% of the width counts as open",
+            FeatureMaskBuilder.isMouthOpen(ring(10f)))
+        assertFalse(FeatureMaskBuilder.isMouthOpen(ring(9f)))
+        assertFalse(FeatureMaskBuilder.isMouthOpen(emptyList()))
+        assertFalse(FeatureMaskBuilder.isMouthOpen(listOf(PointF(0f, 0f), PointF(1f, 1f))))
+    }
+
+    @Test
     fun `teethMask is a narrow band inside the mouth`() {
         val lips = listOf(
             PointF(170f, 270f), PointF(230f, 270f),
@@ -132,6 +217,61 @@ class FeatureMaskBuilderTest {
         assertEquals(230f, b.right, 1f)
         assertTrue("vertical extent inside the lip interior", b.top >= 268f && b.bottom <= 292f)
         assertTrue("mouth centre sits inside the aperture", b.top <= 280f && b.bottom >= 280f)
+    }
+
+    @Test
+    fun `an empty inner-lip ring falls back to the legacy 4-point lens`() {
+        // ML Kit-only detection (or a Mesh without a mouth) → lumbar gate on the
+        // analytic lens between corners and lip bands, unchanged behavior.
+        val polygon = FeatureMaskBuilder.teethPolygon(
+            emptyList(), PointF(170f, 280f), PointF(230f, 280f)
+        )
+        assertNotNull(polygon)
+        assertEquals("legacy lens has its 4 poles", 4, polygon!!.size)
+        assertEquals("left edge on the mouth-left corner", 170f, polygon[0].x, 0.001f)
+        assertEquals("right edge on the mouth-right corner", 230f, polygon[2].x, 0.001f)
+    }
+
+    @Test
+    fun `a wide smile yields a dense resampled inner-lip ring`() {
+        // ~180 px wide mouth opening → target = clamp(180/8, 24, 96) → 24..96
+        // nodes (a ring denser than the coarse 4-point lens).
+        val ring = InnerLipRing(cx = 200f, cy = 200f, halfWidth = 90f, halfHeight = 28f)
+        val polygon = FeatureMaskBuilder.teethPolygon(
+            emptyList(), PointF(110f, 200f), PointF(290f, 200f), ring
+        )
+        assertNotNull(polygon)
+        assertTrue("dense ring (> 4 nodes)", polygon!!.size > 4)
+        assertTrue("nodes are a fraction of the aperture width", polygon.size in 24..96)
+    }
+
+    @Test
+    fun `inner-lip ring polygon hugs the mouth opening bounds`() {
+        val ring = InnerLipRing(cx = 200f, cy = 200f, halfWidth = 90f, halfHeight = 28f)
+        val polygon = FeatureMaskBuilder.teethPolygon(
+            emptyList(), PointF(110f, 200f), PointF(290f, 200f), ring
+        )
+        assertNotNull(polygon)
+        val minX = polygon!!.minOf { it.x }
+        val maxX = polygon.maxOf { it.x }
+        val minY = polygon.minOf { it.y }
+        val maxY = polygon.maxOf { it.y }
+        // The resampled ring stays inside the original ring's bounding box
+        // (aperture 110..290 x 172..228).
+        assertTrue("aperture width kept", minX >= 110f && maxX <= 290f)
+        assertTrue("aperture height kept", minY >= 172f && maxY <= 228f)
+    }
+
+    @Test
+    fun `resampleRing is stable and closed under zero-length edges`() {
+        // A degenerate ring (collapsed arc length) must survive resampling
+        // without producing NaN/zero-shot geometry.
+        val degenerate = listOf(PointF(10f, 10f), PointF(10f, 10f), PointF(10f, 10f))
+        assertEquals(degenerate, FeatureMaskBuilder.resampleRing(degenerate, 32))
+        // A tiny ring resampled up keeps the total count exactly requested.
+        val tiny = InnerLipRing(200f, 200f, halfWidth = 5f, halfHeight = 2f)
+        assertEquals(24, FeatureMaskBuilder.resampleRing(tiny, 24).size)
+        assertEquals(96, FeatureMaskBuilder.resampleRing(tiny, 96).size)
     }
 
     @Test

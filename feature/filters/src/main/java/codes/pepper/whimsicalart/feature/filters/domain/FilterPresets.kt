@@ -348,6 +348,18 @@ object FilterPresets {
                 0f, 0f, 1.05f, 0f, 4f,
                 0f, 0f, 0f, 1f, 0f
             )).apply { setSaturation(1.1f) }
+        ),
+        Filter(
+            id = "red_eye",
+            name = "Red-eye",
+            category = FilterCategory.PORTRAIT,
+            shaderCode = IDENTITY_SHADER,
+            previewColorMatrix = ColorMatrix(floatArrayOf(
+                0.86f, 0.08f, 0.06f, 0f, 0f,
+                0.04f, 0.98f, 0.02f, 0f, 0f,
+                0.04f, 0.02f, 0.98f, 0f, 0f,
+                0f, 0f, 0f, 1f, 0f
+            ))
         )
     )
 
@@ -358,9 +370,21 @@ object FilterPresets {
     )
 
     private val lensFilterIds = linkedSetOf(
-        "clear", "uv", "cir_polarizer", "lin_polarizer", "neutral_density",
+        "red_eye", "clear", "uv", "cir_polarizer", "lin_polarizer", "neutral_density",
         "infrared", "soft", "star", "bokeh", "anamorphic", "astro"
     )
+
+    /**
+     * Lens filters that are rendered as real pixel passes in the editor's
+     * BitmapRenderer rather than as colour-matrix approximations. These ids
+     * are excluded from [concatFilterMatrices] so the approximation never
+     * double-applies on top of the real pass, and the draw-time preview colour
+     * filter hides them until the composite preview (which runs the real pass)
+     * is available.
+     */
+    val realPassLensFilterIds = linkedSetOf("red_eye", "star", "anamorphic", "astro")
+
+    fun isRealPassLensFilter(id: String): Boolean = id in realPassLensFilterIds
 
     /** Single-select colour-grading presets (linear colour matrices). */
     val colorFilters: List<Filter> = filters.filter { it.id in colorFilterIds }
@@ -374,17 +398,31 @@ object FilterPresets {
      * Composes a single colour matrix from the single-selected colour filter and
      * all enabled (multi-select) lens filters, applied in order. Returns null
      * when no filter matrix is active. Lens filters are independent of the
-     * colour filter, so both can apply together.
+     * colour filter, so both can apply together. Lens filters rendered as real
+     * pixel passes ([realPassLensFilterIds]) are skipped here; those are applied
+     * directly by the renderer's lens-pass stage.
+     *
+     * Memoized keyed by the selection so the per-recomposition calls (EditorScreen
+     * preview + tool panel) don't re-allocate the piece list and re-concat the
+     * matrices every frame. Cache values are copied on the way out so a caller
+     * mutating the returned array can never poison the cache.
      */
     fun concatFilterMatrices(
         colorFilterId: String?,
         enabledLensFilterIds: Set<String>
     ): FloatArray? {
-        val pieces = ArrayList<FloatArray>(enabledLensFilterIds.size + 1)
+        // Key by the ITERATION ORDER (list), not the set: matrix concat order is
+        // significant, and two content-equal sets can iterate differently, so a
+        // content-only key could return a matrix built from a different order.
+        val orderedIds = enabledLensFilterIds.toList()
+        val key = Pair(colorFilterId, orderedIds)
+        filterMatrixCache[key]?.let { return it.copyOf() }
+        val pieces = ArrayList<FloatArray>(orderedIds.size + 1)
         colorFilterId?.let { id ->
             getFilterById(id)?.previewColorMatrix?.array?.let { pieces.add(it) }
         }
-        enabledLensFilterIds.forEach { id ->
+        orderedIds.forEach { id ->
+            if (id in realPassLensFilterIds) return@forEach
             getFilterById(id)?.previewColorMatrix?.array?.let { pieces.add(it) }
         }
         if (pieces.isEmpty()) return null
@@ -392,12 +430,17 @@ object FilterPresets {
         for (i in 1 until pieces.size) {
             result.postConcat(ColorMatrix(pieces[i]))
         }
-        return result.array
+        filterMatrixCache[key] = result.array
+        return result.array.copyOf()
     }
 
+    private val filterMatrixCache = HashMap<Pair<String?, List<String>>, FloatArray>()
+
     fun getFilterById(id: String): Filter? {
-        return filters.find { it.id == id }
+        return filtersById[id]
     }
+
+    private val filtersById: Map<String, Filter> = filters.associateBy { it.id }
 
     fun getFiltersByCategory(category: FilterCategory): List<Filter> {
         return filters.filter { it.category == category }

@@ -1,7 +1,12 @@
 package codes.pepper.whimsicalart.feature.editor.ui
 
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroidSize
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateRotation
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
@@ -12,12 +17,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import coil.compose.SubcomposeAsyncImage
+import kotlin.math.PI
+import kotlin.math.abs
 
 /**
  * The current zoom/pan transform of the editor's photo viewport. Kept as a
@@ -36,6 +44,57 @@ class ViewportTransform {
         offsetX = 0f
         offsetY = 0f
     }
+
+    /** Overwrites this transform with [other]'s scale and offsets. */
+    fun copyFrom(other: ViewportTransform) {
+        scale = other.scale
+        offsetX = other.offsetX
+        offsetY = other.offsetY
+    }
+}
+
+/**
+ * Maps a two-finger twist delta (degrees, accumulating on the current value)
+ * onto the current rotation (degrees) with a `[0, 360)` wrap, so the transform
+ * twist and the free-rotate slider always describe the same angle
+ * (docs/effects_reference.md → Transform → *Twist gesture*).
+ */
+internal fun rotatedByDelta(currentDegrees: Float, deltaDegrees: Float): Float =
+    ((currentDegrees + deltaDegrees) % 360f + 360f) % 360f
+
+/**
+ * The rotation the canvas layer must show. Over a displayed composite the
+ * committed rotation is already baked into its pixels — BUT only the amount the
+ * LAST published fold stamped ([compositeBakedRotation]); the transform toolbar
+ * (slider / CW-CCW) commits a new angle instantly while the re-fold chews on it,
+ * so the unbaked remainder `(rotation − baked)` must be restored on top to give
+ * the slider the same live feedback as the twist. The twist's transient
+ * [liveRotationDegrees] adds on either base. Outside a composite the plain
+ * committed + live rotation applies.
+ */
+internal fun displayRotation(
+    useCompositePreview: Boolean,
+    committedRotation: Float,
+    bakedRotation: Float,
+    liveRotationDegrees: Float,
+    eyeEnabled: Boolean
+): Float = when {
+    useCompositePreview -> (committedRotation - bakedRotation) + liveRotationDegrees
+    eyeEnabled -> 0f
+    else -> committedRotation + liveRotationDegrees
+}
+
+/** Flip mirrors of [displayRotation]: over a composite only the UNBAKED flip
+ * (current ⊕ stamped) is shown, otherwise the committed flip. */
+internal fun displayFlip(
+    useCompositePreview: Boolean,
+    committed: Boolean,
+    baked: Boolean,
+    eyeEnabled: Boolean
+): Boolean = when {
+    useCompositePreview -> committed != baked
+    eyeEnabled -> false
+    else -> committed
 }
 
 @Composable
@@ -49,18 +108,83 @@ fun ZoomableImage(
     colorFilter: ColorFilter? = null,
     bitmapOverride: ImageBitmap? = null,
     transform: ViewportTransform = remember { ViewportTransform() },
-    panZoomEnabled: Boolean = true
+    panZoomEnabled: Boolean = true,
+    twistEnabled: Boolean = false,
+    onTwistDegrees: ((Float) -> Unit)? = null
 ) {
     Box(
         modifier = modifier
             .fillMaxSize()
             .then(
-                if (panZoomEnabled) {
-                    Modifier.pointerInput(Unit) {
-                        detectTransformGestures { _, pan, zoom, _ ->
-                            transform.scale = (transform.scale * zoom).coerceIn(0.5f, 5f)
-                            transform.offsetX += pan.x
-                            transform.offsetY += pan.y
+                if (panZoomEnabled || twistEnabled) {
+                    Modifier.pointerInput(panZoomEnabled, twistEnabled) {
+                        // Mirrors the platform detectTransformGestures loop (same
+                        // touch-slop gating, pan/zoom accumulation and event
+                        // consumption) but replaces the rotation source with the
+                        // TRUE inter-finger twist (the change in the angle of the
+                        // two-pointer vector, tracked per pointer-id pair and
+                        // wrapped across ±π) so a zoom-only pinch measures ≈0°,
+                        // stabilised by a RotationTwistFilter (dead zone +
+                        // sliding-window average, 1:1 with the fingers' net
+                        // twist) — exactly as the shared placement-overlay
+                        // gestures do (docs/effects_reference.md → *Shared
+                        // placement-overlay gestures*).
+                        val rotationFilter = RotationTwistFilter()
+                        awaitEachGesture {
+                            val touchSlop = viewConfiguration.touchSlop
+                            var rotation = 0f
+                            var zoom = 1f
+                            var pan = Offset.Zero
+                            var pastTouchSlop = false
+                            rotationFilter.reset()
+                            // Fresh per gesture (like the overlay gestures), so a
+                            // re-grab never replays a phantom rotation.
+                            val twist = InterFingerTwist()
+                            awaitFirstDown(requireUnconsumed = false)
+                            do {
+                                val event = awaitPointerEvent()
+                                val canceled = event.changes.any { it.isConsumed }
+                                if (!canceled) {
+                                    val zoomChange = event.calculateZoom()
+                                    val panChange = event.calculatePan()
+                                    val pressed = event.changes.filter { it.pressed }
+                                    val rotationChange = if (pressed.size == 2) {
+                                        twist.sample(
+                                            pressed[0].position, pressed[1].position,
+                                            pressed[0].id.value, pressed[1].id.value
+                                        )
+                                    } else {
+                                        twist.reset()
+                                        event.calculateRotation()
+                                    }
+                                    if (!pastTouchSlop) {
+                                        zoom *= zoomChange
+                                        rotation += rotationChange
+                                        pan += panChange
+                                        val centroidSize = event.calculateCentroidSize(useCurrent = false)
+                                        val zoomMotion = abs(1 - zoom) * centroidSize
+                                        val rotationMotion = abs(rotation * PI.toFloat() * centroidSize / 180f)
+                                        val panMotion = pan.getDistance()
+                                        if (zoomMotion > touchSlop || rotationMotion > touchSlop || panMotion > touchSlop) {
+                                            pastTouchSlop = true
+                                        }
+                                    }
+                                    if (pastTouchSlop) {
+                                        if (panZoomEnabled) {
+                                            transform.scale = (transform.scale * zoomChange).coerceIn(0.5f, 5f)
+                                            transform.offsetX += panChange.x
+                                            transform.offsetY += panChange.y
+                                        }
+                                        if (twistEnabled) {
+                                            val applied = rotationFilter.sample(rotationChange)
+                                            if (applied != 0f) {
+                                                onTwistDegrees?.invoke(applied * 180f / PI.toFloat())
+                                            }
+                                        }
+                                    }
+                                    event.changes.forEach { if (it.position != it.previousPosition) it.consume() }
+                                }
+                            } while (!canceled && event.changes.any { it.pressed })
                         }
                     }
                 } else {

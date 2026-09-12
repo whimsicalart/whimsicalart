@@ -1,55 +1,130 @@
 package codes.pepper.whimsicalart.feature.editor.ui.text
 
-import android.graphics.Typeface
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
+import codes.pepper.whimsicalart.feature.editor.domain.TextAlignment
+import codes.pepper.whimsicalart.feature.editor.domain.TextBackgroundShape
+import codes.pepper.whimsicalart.feature.editor.domain.TextFont
+import codes.pepper.whimsicalart.feature.editor.domain.TextItem
+import codes.pepper.whimsicalart.feature.editor.domain.TextOutline
+import codes.pepper.whimsicalart.feature.editor.domain.TextShadow
+import codes.pepper.whimsicalart.feature.editor.domain.TextStyleFlag
 
+/**
+ * The Text tool's LIVE, dp-space editing model: [position] is the CENTER of the
+ * text (in dp), [fontSize], shadow [distance] and outline [size] are dp widths,
+ * and the colour fields carry their opacity in the alpha channel. Converted to a
+ * normalized [TextItem] when it is committed to the stack (and back again when
+ * restoring an item on re-entry).
+ */
 data class TextOverlay(
     val id: String,
     val text: String,
     val position: Offset,
     val fontSize: Float = 24f,
     val color: Color = Color.White,
-    val typeface: Typeface = Typeface.DEFAULT,
-    val fontStyle: FontStyle = FontStyle.NORMAL,
-    val rotation: Float = 0f,
-    val scaleX: Float = 1f,
-    val scaleY: Float = 1f,
-    val hasShadow: Boolean = false,
-    val shadowColor: Color = Color.Black,
-    val shadowRadius: Float = 4f,
-    val hasStroke: Boolean = false,
-    val strokeColor: Color = Color.Black,
-    val strokeWidth: Float = 2f,
+    val fontFamily: TextFont = TextFont.DEFAULT,
+    val style: Set<TextStyleFlag> = emptySet(),
     val alignment: TextAlignment = TextAlignment.CENTER,
+    val scale: Float = 1f,
+    val rotation: Float = 0f,
+    val hasShadow: Boolean = false,
+    val shadowAngle: Float = 45f,
+    val shadowDistance: Float = 6f,
+    val shadowColor: Color = Color.Black,
+    val hasOutline: Boolean = false,
+    val outlineSize: Float = 2f,
+    val outlineColor: Color = Color.Black,
+    val outlineBlur: Float = 0f,
     val backgroundShape: TextBackgroundShape = TextBackgroundShape.NONE,
-    val backgroundColor: Color = Color.Black
+    val backgroundColor: Color = Color.Black,
+    val backgroundBlur: Float = 0f
 )
 
-enum class TextBackgroundShape {
-    NONE,
-    ROUNDED,
-    OVAL,
-    PILL
+/**
+ * Normalizes this dp-space editing item against the FITTED image rect within the
+ * box ([frameWidthPx]×[frameHeightPx], letterbox top-left at
+ * [frameOffsetX]/[frameOffsetY] in box px), so the baked normalized position and
+ * sizes match the fraction of the image the user sees — with an unletterboxed
+ * box (offset 0, box == image) this is identical to normalizing by the box.
+ */
+fun TextOverlay.toTextItem(
+    density: Density,
+    frameWidthPx: Float,
+    frameHeightPx: Float,
+    frameOffsetX: Float = 0f,
+    frameOffsetY: Float = 0f
+): TextItem {
+    val px = { dp: Float -> with(density) { dp.dp.toPx() } }
+    val w = if (frameWidthPx > 0f) frameWidthPx else 1f
+    val h = if (frameHeightPx > 0f) frameHeightPx else 1f
+    return TextItem(
+        id = id,
+        text = text,
+        color = color.toArgb(),
+        fontFamily = fontFamily,
+        fontSize = px(fontSize) / w,
+        x = (px(position.x) - frameOffsetX) / w,
+        y = (px(position.y) - frameOffsetY) / h,
+        scale = scale,
+        rotationDegrees = rotation,
+        style = style,
+        alignment = alignment,
+        shadow = TextShadow(
+            enabled = hasShadow,
+            angleDegrees = shadowAngle,
+            distance = px(shadowDistance) / w,
+            color = shadowColor.toArgb()
+        ),
+        outline = TextOutline(
+            enabled = hasOutline,
+            size = px(outlineSize) / w,
+            color = outlineColor.toArgb(),
+            blur = outlineBlur
+        ),
+        background = backgroundShape,
+        backgroundColor = backgroundColor.toArgb(),
+        backgroundBlur = backgroundBlur
+    )
 }
 
-enum class TextAlignment {
-    LEFT,
-    CENTER,
-    RIGHT
-}
-
-enum class TextFont(val displayName: String) {
-    DEFAULT("Default"),
-    SERIF("Serif"),
-    MONOSPACE("Monospace"),
-    SANS_SERIF("Sans Serif"),
-    HANDWRITING("Handwriting")
-}
-
-enum class FontStyle(val value: Int) {
-    NORMAL(Typeface.NORMAL),
-    BOLD(Typeface.BOLD),
-    ITALIC(Typeface.ITALIC),
-    BOLD_ITALIC(Typeface.BOLD_ITALIC)
+/** De-normalizes a committed [TextItem] back into dp-space for re-editing. */
+fun TextItem.toTextOverlay(
+    density: Density,
+    frameWidthPx: Float,
+    frameHeightPx: Float,
+    frameOffsetX: Float = 0f,
+    frameOffsetY: Float = 0f
+): TextOverlay {
+    val w = if (frameWidthPx > 0f) frameWidthPx else 1f
+    val h = if (frameHeightPx > 0f) frameHeightPx else 1f
+    return TextOverlay(
+        id = id,
+        text = text,
+        position = Offset(
+            with(density) { (x * w + frameOffsetX).toDp().value },
+            with(density) { (y * h + frameOffsetY).toDp().value }
+        ),
+        fontSize = with(density) { (fontSize * w).toDp().value },
+        color = Color(color),
+        fontFamily = fontFamily,
+        style = style,
+        alignment = alignment,
+        scale = scale,
+        rotation = rotationDegrees,
+        hasShadow = shadow.enabled,
+        shadowAngle = shadow.angleDegrees,
+        shadowDistance = with(density) { (shadow.distance * w).toDp().value },
+        shadowColor = Color(shadow.color),
+        hasOutline = outline.enabled,
+        outlineSize = with(density) { (outline.size * w).toDp().value },
+        outlineColor = Color(outline.color),
+        outlineBlur = outline.blur,
+        backgroundShape = background,
+        backgroundColor = Color(backgroundColor),
+        backgroundBlur = backgroundBlur
+    )
 }

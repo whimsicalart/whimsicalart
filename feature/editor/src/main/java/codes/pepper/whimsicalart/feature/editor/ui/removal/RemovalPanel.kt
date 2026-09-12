@@ -16,6 +16,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import codes.pepper.whimsicalart.core.designsystem.LocalUiScale
 
 @Composable
 fun RemovalPanel(
@@ -26,47 +27,73 @@ fun RemovalPanel(
     modifier: Modifier = Modifier
 ) {
     val showClearConfirm = remember { mutableStateOf(false) }
+    val s = LocalUiScale.current
 
-    Column(modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+    Column(modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp * s, vertical = 8.dp * s)) {
         Row(modifier = Modifier.fillMaxWidth()) {
-            Text("Size", modifier = Modifier.padding(end = 8.dp))
+            Text(
+                text = "Size",
+                modifier = Modifier.padding(end = 8.dp * s),
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize = MaterialTheme.typography.bodyMedium.fontSize * s
+                )
+            )
             Slider(
                 value = state.brushSize,
                 onValueChange = onBrushSizeChange,
                 valueRange = 12f..80f,
-                modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
+                modifier = Modifier.weight(1f).padding(horizontal = 8.dp * s)
             )
-            Text("${state.brushSize.toInt()}")
+            Text(
+                text = "${state.brushSize.toInt()}",
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize = MaterialTheme.typography.bodyMedium.fontSize * s
+                )
+            )
         }
         Row(modifier = Modifier.fillMaxWidth()) {
+            val labelStyle = MaterialTheme.typography.labelMedium.copy(
+                fontSize = MaterialTheme.typography.labelMedium.fontSize * s
+            )
             FilterChip(
                 selected = state.isErasing,
                 onClick = onToggleErasing,
-                label = { Text("Eraser") },
+                label = { Text("Eraser", style = labelStyle) },
                 colors = FilterChipDefaults.filterChipColors(
                     selectedContainerColor = MaterialTheme.colorScheme.tertiary,
                     selectedLabelColor = MaterialTheme.colorScheme.onTertiary
                 )
             )
             TextButton(onClick = { showClearConfirm.value = true }) {
-                Text("Clear All")
+                Text(
+                    "Clear All",
+                    style = MaterialTheme.typography.labelLarge.copy(
+                        fontSize = MaterialTheme.typography.labelLarge.fontSize * s
+                    )
+                )
             }
         }
     }
 
     if (showClearConfirm.value) {
+        val dialogStyle = MaterialTheme.typography.bodyLarge.copy(
+            fontSize = MaterialTheme.typography.bodyLarge.fontSize * s
+        )
+        val dialogTitleStyle = MaterialTheme.typography.titleLarge.copy(
+            fontSize = MaterialTheme.typography.titleLarge.fontSize * s
+        )
         AlertDialog(
             onDismissRequest = { showClearConfirm.value = false },
-            title = { Text("Remove selected strokes?") },
-            text = { Text("The painted areas will be restored to the original.") },
+            title = { Text("Remove selected strokes?", style = dialogTitleStyle) },
+            text = { Text("The painted areas will be restored to the original.", style = dialogStyle) },
             confirmButton = {
                 TextButton(onClick = {
                     onClear()
                     showClearConfirm.value = false
-                }) { Text("Remove") }
+                }) { Text("Remove", style = dialogStyle) }
             },
             dismissButton = {
-                TextButton(onClick = { showClearConfirm.value = false }) { Text("Cancel") }
+                TextButton(onClick = { showClearConfirm.value = false }) { Text("Cancel", style = dialogStyle) }
             }
         )
     }

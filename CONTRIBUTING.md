@@ -25,10 +25,13 @@ The project is a multi-module Gradle build powered by version-catalog convention
 | Path | Purpose |
 |------|---------|
 | `app/` | Application entry point, theme, navigation |
-| `core/` | Shared domain, data, and common utilities |
-| `feature/` | Editor, filters, beauty, collage, stickers, gallery, settings |
-| `designsystem/` | Design system components |
-| `build-logic/` | Convention plugins for app/library/Hilt/Room modules |
+| `core/` | Shared utilities (`common`), design system (`designsystem`), shared domain (`domain`), reserved `data` |
+| `feature/` | Editor, filters, beauty, gallery, collage, stickers, camera, settings |
+| `build-logic/` | Convention plugin scaffolding (not wired — modules apply version-catalog aliases directly) |
+
+> Note: `compileSdk`, `minSdk`/`targetSdk` and versions are centralized in the
+> module `build.gradle.kts` files / `gradle/libs.versions.toml`. The live modules
+> currently build with `compileSdk = 35`.
 
 ### Building
 
@@ -69,13 +72,39 @@ credentials are injected from repository secrets (`KEYSTORE_BASE64`,
 `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`) — never commit keystore
 material or passwords to the repository.
 
+### F-Droid release
+
+WhimsicalArt also targets the [F-Droid](https://f-droid.org) repository. F-Droid
+rebuilds the app **from source with its own signing key**, so the F-Droid build
+differs from the GitHub one:
+
+- The checkout must build **without any local signing config** (no
+  `keystore.properties`, no secrets). It already does: when `keystore.properties`
+  is absent the release variant falls back to debug signing (`app/build.gradle.kts`),
+  which is exactly what F-Droid's build needs.
+- **Version code/name come from git tags.** F-Droid reads `versionCode` /
+  `versionName` from the build (currently `gradle.properties`); every tag must
+  bump `versionCode` monotonically.
+- **No non-free dependencies.** F-Droid's Inclusion Policy rejects apps that link
+  proprietary SDKs. This currently affects **ML Kit** (`com.google.mlkit`,
+  closed-source, used for OCR, image labeling, collage/beauty face detection and
+  mosaic privacy masks): it must be replaced with open, buildable alternatives
+  (e.g. the already-used Apache-2.0 MediaPipe Tasks, or TFLite/OpenCV-based
+  processors) before an F-Droid submission can be accepted. Tracked in `.tmp/next.md`.
+- **No trackers/ad-libs**, which the app already satisfies (no Play Services /
+  Firebase / analytics — see `docs/development.md`).
+- Versioned model assets (`.tflite`) are built from git-tracked files, so the
+  build is reproducible without network fetches at build time.
+
 ## Code Style
 
 ### Kotlin
 
 - Follow [Kotlin Coding Conventions](https://kotlinlang.org/docs/coding-conventions.html)
 - Use coroutines for asynchronous operations
-- Prefer sealed classes for state management
+- Prefer immutable `data class` UI state mutated with `.copy(...)` behind a
+  private `MutableStateFlow` (use sealed classes/interfaces only for genuinely
+  distinct multi-state variants)
 - Avoid `!!` operator - use safe calls or early returns
 
 ### Compose

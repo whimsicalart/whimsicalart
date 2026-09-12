@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import codes.pepper.whimsicalart.core.designsystem.LocalUiScale
 
 /**
  * First-launch welcome screen. Shows the app's value props and a single
@@ -29,6 +30,7 @@ fun OnboardingScreen(
     onFinish: () -> Unit,
     viewModel: OnboardingViewModel = hiltViewModel()
 ) {
+    val s = LocalUiScale.current
     LaunchedEffect(Unit) {
         if (!viewModel.isFirstLaunch) {
             onFinish()
@@ -38,29 +40,29 @@ fun OnboardingScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding((24.dp * s).coerceAtLeast(12.dp)),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
         Text(
             text = "WhimsicalArt",
-            style = MaterialTheme.typography.headlineLarge,
+            style = MaterialTheme.typography.headlineLarge.copy(fontSize = MaterialTheme.typography.headlineLarge.fontSize * s),
             textAlign = TextAlign.Center
         )
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(16.dp * s))
         Text(
             text = "Edit your photos beautifully",
-            style = MaterialTheme.typography.titleMedium,
+            style = MaterialTheme.typography.titleMedium.copy(fontSize = MaterialTheme.typography.titleMedium.fontSize * s),
             textAlign = TextAlign.Center
         )
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(32.dp * s))
 
-        FeatureRow(label = "Filters, stickers, text and beauty tools")
-        Spacer(modifier = Modifier.height(12.dp))
-        FeatureRow(label = "Background blur and object removal")
-        Spacer(modifier = Modifier.height(12.dp))
-        FeatureRow(label = "Collage maker and in-app camera")
-        Spacer(modifier = Modifier.height(40.dp))
+        FeatureRow(label = "Filters, stickers, text and beauty tools", scale = s)
+        Spacer(modifier = Modifier.height(12.dp * s))
+        FeatureRow(label = "Background blur and object removal", scale = s)
+        Spacer(modifier = Modifier.height(12.dp * s))
+        FeatureRow(label = "Collage maker and in-app camera", scale = s)
+        Spacer(modifier = Modifier.height(40.dp * s))
 
         Button(
             onClick = {
@@ -69,20 +71,23 @@ fun OnboardingScreen(
             },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Get Started")
+            Text(
+                "Get Started",
+                style = MaterialTheme.typography.labelLarge.copy(fontSize = MaterialTheme.typography.labelLarge.fontSize * s)
+            )
         }
     }
 }
 
 @Composable
-private fun FeatureRow(label: String) {
+private fun FeatureRow(label: String, scale: Float) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.bodyLarge,
+            style = MaterialTheme.typography.bodyLarge.copy(fontSize = MaterialTheme.typography.bodyLarge.fontSize * scale),
             textAlign = TextAlign.Center
         )
     }

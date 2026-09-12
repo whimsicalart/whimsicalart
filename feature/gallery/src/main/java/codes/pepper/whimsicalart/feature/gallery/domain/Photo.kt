@@ -8,5 +8,10 @@ data class Photo(
     val displayName: String,
     val dateAdded: Long,
     val width: Int,
-    val height: Int
+    val height: Int,
+    val dateModified: Long = 0L,
+    val size: Long = 0L,
+    val path: String = "",
+    val mimeType: String = "",
+    val dateTaken: Long = 0L
 )

@@ -19,11 +19,15 @@ WhimsicalArt exists to provide a modern, open-source alternative that respects u
 
 ## Features
 
-- **Classic Filter Collection** - Time-tested photo filters and effects
-- **Basic Editing Tools** - Crop, rotate, adjust brightness/contrast/saturation
-- **Beauty Tools** - Skin smoothing, blemish removal, face enhancement
-- **Stickers and Text** - Add creative elements to your photos
+- **Classic Filter Collection** - Color, style, and lens filter looks
+- **Basic Editing Tools** - Crop, rotate/transform, adjust brightness/contrast/saturation/exposure/shadows/highlights/temperature/tint/vignette/sharpening
+- **Beauty Tools** - Skin smoothing, blemish removal, face enhancement, reshaping, and makeup (on-device, offline)
+- **Text & OCR** - Editable text overlays with fonts, styles, and Recognize Text (OCR)
+- **Stickers and Decorations** - Stickers, emoji, mosaic, blur brush, pen, frames
+- **Layers** - Every edit is a reorderable, reversible layer; Merge Layers to flatten
+- **Background** - Object removal, background blur, and background replace
 - **Collage Maker** - Combine multiple photos into beautiful layouts
+- **Save & Share** - JPEG/PNG export at your chosen quality and resolution
 - **No Ads** - Clean, distraction-free experience
 - **No Account Required** - Works offline, no sign-up needed
 - **Free Forever** - All features available at no cost
@@ -31,16 +35,16 @@ WhimsicalArt exists to provide a modern, open-source alternative that respects u
 ## Requirements
 
 - Android 8.0 (API 26) or higher
-- Camera permission (for camera features)
-- Storage permission (for saving photos)
+- Photo access permission (to browse the gallery and save edits)
+- Camera permission (for camera capture)
 
 ## Building from Source
 
 ### Prerequisites
 
-- Android Studio Hedgehog (2023.1.1) or newer
+- Android Studio (Iguana 2024.2.1) or newer
 - JDK 17
-- Android SDK 34
+- Android SDK 35 (compileSdk)
 
 ### Steps
 
@@ -60,6 +64,13 @@ WhimsicalArt exists to provide a modern, open-source alternative that respects u
    ```bash
    adb install app/build/outputs/apk/debug/app-debug.apk
    ```
+
+## Download
+
+WhimsicalArt is distributed as a **GitHub Release APK** (see
+[Releases](https://github.com/whimsicalart/whimsicalart/releases)) and is planned
+for **F-Droid**. The app works fully offline, requires no account, and contains
+no ads or trackers.
 
 ## Documentation
 
@@ -84,14 +95,16 @@ Contributions are welcome! Please read our [Contributing Guidelines](CONTRIBUTIN
 
 ## Roadmap
 
-- [ ] Core photo editing engine
-- [ ] Modern Material Design 3 UI
-- [ ] Filter library implementation
-- [ ] Beauty tools suite
-- [ ] Collage maker
-- [ ] Sticker pack support
+- [x] Core photo editing engine (reversible, layered effect stack)
+- [x] Modern Material Design 3 UI
+- [x] Filter library (color / style / lens looks)
+- [x] Beauty tools suite
+- [x] Collage maker
+- [x] Sticker, text, mosaic, pen, and frame tools
+- [x] Background blur / replace and object removal
 - [ ] Batch editing capabilities
 - [ ] Widget for quick edits
+- [ ] Release to F-Droid
 
 ## License
 

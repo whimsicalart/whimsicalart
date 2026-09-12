@@ -93,36 +93,33 @@ WhimsicalArt is an open-source Android photo editing app. This document tracks d
 - [x] Save path configuration
 - [x] Resolution selection (Original, High, Medium, Low)
 
-## Phase 3: Filter System (OpenGL ES + GLSL Shaders) ✅
+## Phase 3: Filter System (CPU color-matrix presets) ✅
 
-### 3.1 OpenGL ES Renderer
-- [x] Create FilterRenderer with OpenGL ES 3.0
-- [x] Implement shader compilation pipeline
-- [x] Create texture loading system
-- [x] Add uniform/attribute management
-- [x] Set up GLSurfaceView in Compose
-- [x] Create framebuffer objects (FBO) for offscreen rendering
+### 3.1 Filter data model & presets
+- [x] Define Filter data model (id, name, category, `shaderCode` legacy placeholder, `previewColorMatrix`)
+- [x] Create 10+ preset filters (Basic, Artistic, Vintage, Monochrome) as `ColorMatrix` grades
+- [x] Classify presets into single-select **Color Filters** and multi-select **Lens Filters**
+- [x] Compose color filter + enabled lens filters into one matrix (`concatFilterMatrices`)
 
 ### 3.2 Filter Pipeline
-- [x] Define Filter data model
-- [x] Create 10+ preset filters (Basic, Artistic, Vintage, Monochrome)
-- [x] Implement intensity control via uFilterParam uniform
+- [x] Implement intensity control
 - [x] Build horizontal scrollable filter selector UI
 - [x] Add filter parameter adjustment sliders
 - [x] Implement real-time filter preview
 
-### 3.3 3D LUT Color Grading
-- [x] Load 3D LUT textures (64×64×64)
-- [x] Implement trilinear interpolation
-- [x] Create LUT packing/unpacking utilities
-- [x] Add intensity blending
+> The full rendering is **CPU-only**: `BitmapRenderer` applies each filter's
+> `ColorMatrix`, plus the analytic `StyleFilterProcessor` tone-map (Filmic /
+> Vibrant / Matte) and the `EnhanceProcessor` auto-enhance pass. There is **no
+> OpenGL / GLSL / GPU pipeline and no 3D LUT** — the `Filter.shaderCode` field
+> is a vestigial GLSL placeholder never compiled or run.
 
 ## Phase 4: Beauty Tools ✅
 
 ### 4.1 Face Detection
-- [x] Integrate ML Kit Face Detection
-- [x] Get face landmarks (eyes, nose, mouth, cheeks)
-- [x] Create face mesh for reshaping
+- [x] Integrate on-device face detection (originally ML Kit; superseded by the **MediaPipe Tasks**
+      FaceLandmarker 478-point pipeline — see the Phase 9 skin/face entries and
+      `docs/effect_stack.md`)
+- [x] Get face landmarks (eyes, nose, mouth, cheeks) / face mesh for reshaping
 - [x] Handle multiple faces
 - [x] Add fallback for no-face detection
 
@@ -280,6 +277,17 @@ WhimsicalArt is an open-source Android photo editing app. This document tracks d
 - [x] Contributing guidelines update
 - [x] Changelog
 
+### 8.4 F-Droid Release
+- [ ] Replace the closed-source ML Kit dependencies (`com.google.mlkit`: face
+      detection, text recognition, image labeling) with open alternatives — F-Droid's
+      Inclusion Policy rejects apps linking proprietary SDKs
+- [ ] Verify the checkout builds without any signing/`keystore.properties` config
+      (F-Droid re-signs with its own key)
+- [ ] Confirm every git tag bumps `versionCode` monotonically
+- [ ] F-Droid metadata (`fastlane`/`metadata` or `.fdroid.yml`):
+      app description, screenshots, categories, license, source URL
+- [ ] No trackers / Play Services check (already satisfied — see `docs/development.md`)
+
 ---
 
 ## Phase 9: ML Opportunities (Audit) 🔎
@@ -337,22 +345,27 @@ stays at 1.4.2; models with custom ops must go through the MediaPipe/Tasks runti
       `BitmapRenderer.render` between sharpening and background. New
       `EnhanceSettings` (levelsClip / hdrAmount / hdrRadius / denoiseAmount). 5 tests
       (`EnhanceProcessorTest`). Full gate green.
-- [x] **ML filters.** Filters are GLSL + static 3D LUT (heuristic). Learned tone-map / style-transfer
-      / super-res filters as an optional enhancement layer in `BitmapRenderer.render`.
+- [x] **ML filters.** FILTERS = single-select **Color Filters** (`ColorMatrix` grades) + multi-select
+      **Lens Filters** (best-effort analytic matrices via `concatFilterMatrices`). Learned tone-map /
+      style-transfer / super-res filters as an optional enhancement layer in `BitmapRenderer.render`.
       **DONE** (`972f9dd`): `StyleFilter` (Filmic / Vibrant / Matte) + `StyleFilterProcessor` — an
       analytic per-pixel tone-map "learned-look" layer applied as step 4.6 inside
-      `BitmapRenderer.render` on top of the LUT color matrix (a quantized TFLite style-transfer / LUT
+      `BitmapRenderer.render` on top of the color-matrix filter (a quantized TFLite style-transfer / LUT
       model can later supply the same interface). Wired via `EditorRenderBundle.styleFilter` and a new
       `EditTool.STYLE` picker into `EditorUiState`. `StyleFilter.displayName` used for labels
       (enum `name` collides with `Enum.name`). 5 tests (`StyleFilterTest`). Full gate green.
-- [ ] **Lens filters (physical/ML lens effects).** The UI/UX batch-v2 work split the old FILTERS
+- [x] **Lens filters (physical/ML lens effects).** The UI/UX batch-v2 work split the old FILTERS
       picker into **Color Filters** (single-select, color-matrix looks) + **Lens Filters**
-      (multi-select: `clear, uv, cir_polarizer, lin_polarizer, neutral_density, infrared, soft,
-      star, bokeh, anamorphic, astro`). Lens effects are not linear color transforms — they need
-      physical/ML simulation. Current state: each lens filter is only a best-effort analytic
-      `ColorMatrix` approximation applied via `concatFilterMatrices`. Open-source research
-      (2026-09-02) for true implementations:
-      - **Bokeh** — already implemented in `BitmapRenderer` (`BokehProcessor`).
+      (multi-select: `red_eye, clear, uv, cir_polarizer, lin_polarizer, neutral_density, infrared,
+      soft, star, bokeh, anamorphic, astro`). Lens effects are not linear color transforms — they need
+      physical/ML simulation.
+      **DONE** (`0e16321`): red-eye removal heuristic + star/anamorphic/astro highlight-blur passes
+      are now real Robolectric-safe CPU pixel passes (`LensFilterProcessor` at
+      `feature/editor/.../domain/filter/LensFilter.kt`), carried through the effect fold by
+      `FilterEffect`/`StyleEffect.lensPassIds`, excluded from `concatFilterMatrices`, and surfaced
+      via the composite preview (mirroring the style-filter precedent). Remaining analytic matrices
+      (`clear, uv, cir_polarizer, lin_polarizer, neutral_density, infrared, soft`) stay as-is;
+      `bokeh` is the existing `BokehProcessor`. Open-source research (2026-09-02) for the rest:
       - **Red-eye removal** — `leimao/Auto-Red-Eye-Remover` (C++/OpenCV, MIT); a pure
         heuristic (eye-mask + redness desaturation) is sufficient, no TFLite model needed. Feasible.
       - **Light rays / Star / Anamorphic / Astro** — classic "Volumetric Light Scattering as a
@@ -373,9 +386,7 @@ stays at 1.4.2; models with custom ops must go through the MediaPipe/Tasks runti
       - **UV / infrared / soft** — trivial analytic tint/chroma/brightness matrices; UV/soft already
         adequate. UV = warm tint, infrared = channel pseudo-swap / luminance inversion, soft = diffuse
         blend.
-      Plan: implement red-eye heuristic + light-ray/star/anamorphic/astro highlight-blur passes as
-      new `BitmapRenderer` steps (pure pixel ops, Robolectric-safe); keep reflection/flare-removal
-      + HDRNet-style tone map as future learned-model TODOs.
+      Remaining deferred learned-model TODOs: reflection/flare-removal + HDRNet-style tone map.
 - [x] **Super-resolution / upscale.** "Resolution" selector is bilinear *downscale only* (no upscale).
       Learned single-image SR (Real-ESRGAN/ESRGAN mobile-quantized) — new Upscale 2×/4× feature.
       **DONE** (`e6dae6a`): `SuperResolutionUpscaler` (editor domain) — analytic bicubic
@@ -414,7 +425,9 @@ stays at 1.4.2; models with custom ops must go through the MediaPipe/Tasks runti
 
 ## Notes
 
-- All filters use GPU-accelerated OpenGL ES rendering
+- **Phase 3 lens-refit:** the "ML filters" bullet below records the original (GPU/3D-LUT)
+  heuristic plan; the as-built `StyleFilterProcessor` tone-maps and the lens-filter matrix
+  approximations described in *Lens filters* supersede it — see `docs/development.md`.
 - Beauty tools use the on-device **MediaPipe Tasks** pipeline (FaceMesh 478-point
   landmarker + real skin/hair segmentation) plus analytic per-pixel passes; the
   editor beauty geometry is resolved lazily through the shared

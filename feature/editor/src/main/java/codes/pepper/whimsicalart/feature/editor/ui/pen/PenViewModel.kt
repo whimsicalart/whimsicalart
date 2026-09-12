@@ -22,7 +22,18 @@ data class PenStroke(
     val points: List<Offset>,
     val brushType: PenBrushType,
     val color: Color,
-    val size: Float = 12f
+    val size: Float = 12f,
+    /**
+     * 0–1 colour opacity: makes the drawn art translucent, applied on top of
+     * (never replacing) the chosen colour.
+     */
+    val opacity: Float = 1f,
+    /**
+     * 0–1 edge hardness relative to size: 1 = fully solid across the whole size
+     * (hard edge), 0 = only the centre fully solid fading out to the size (soft
+     * edge), intermediate values blend between the two.
+     */
+    val hardness: Float = 1f
 )
 
 data class PenLayer(
@@ -39,7 +50,16 @@ data class PenEditorState(
     val selectedBrushType: PenBrushType = PenBrushType.SOLID,
     val selectedColor: Color = Color.Red,
     val brushSize: Float = 12f,
-    val undoStack: List<PenStroke> = emptyList()
+    val brushOpacity: Float = 1f,
+    val brushHardness: Float = 1f,
+    val undoStack: List<PenStroke> = emptyList(),
+    /**
+     * Monotonic counter bumped whenever the committed stroke set changes; the
+     * canvas keep-alive compares it against the folded composite's published
+     * version so the pen trace never dead-gaps while the eye-ON first-time
+     * full-stack fold is pending (same contract as MosaicTool.strokesVersion).
+     */
+    val strokesVersion: Int = 0
 ) {
     val activeLayer: PenLayer? get() = layers.getOrNull(activeLayerIndex)
     val strokes: List<PenStroke>
@@ -64,6 +84,14 @@ class PenViewModel @Inject constructor() : ViewModel() {
         _uiState.update { it.copy(brushSize = size) }
     }
 
+    fun updateBrushOpacity(opacity: Float) {
+        _uiState.update { it.copy(brushOpacity = opacity.coerceIn(0f, 1f)) }
+    }
+
+    fun updateBrushHardness(hardness: Float) {
+        _uiState.update { it.copy(brushHardness = hardness.coerceIn(0f, 1f)) }
+    }
+
     fun onDragStart(position: Offset) {
         if (_uiState.value.activeLayer == null) return
         _uiState.update { state ->
@@ -73,7 +101,9 @@ class PenViewModel @Inject constructor() : ViewModel() {
                     points = listOf(position),
                     brushType = state.selectedBrushType,
                     color = state.selectedColor,
-                    size = state.brushSize
+                    size = state.brushSize,
+                    opacity = state.brushOpacity,
+                    hardness = state.brushHardness
                 )
             )
         }
@@ -104,7 +134,8 @@ class PenViewModel @Inject constructor() : ViewModel() {
                 state.copy(
                     layers = layers,
                     currentStroke = null,
-                    undoStack = emptyList()
+                    undoStack = emptyList(),
+                    strokesVersion = state.strokesVersion + 1
                 )
             } else {
                 state.copy(currentStroke = null)
@@ -122,7 +153,8 @@ class PenViewModel @Inject constructor() : ViewModel() {
             layers[activeIndex] = layer.copy(strokes = layer.strokes.dropLast(1))
             state.copy(
                 layers = layers,
-                undoStack = listOf(removed) + state.undoStack
+                undoStack = listOf(removed) + state.undoStack,
+                strokesVersion = state.strokesVersion + 1
             )
         }
     }
@@ -137,7 +169,8 @@ class PenViewModel @Inject constructor() : ViewModel() {
             layers[activeIndex] = layer.copy(strokes = layer.strokes + restored)
             state.copy(
                 layers = layers,
-                undoStack = state.undoStack.drop(1)
+                undoStack = state.undoStack.drop(1),
+                strokesVersion = state.strokesVersion + 1
             )
         }
     }
@@ -148,7 +181,7 @@ class PenViewModel @Inject constructor() : ViewModel() {
             val layer = state.layers.getOrNull(activeIndex) ?: return@update state
             val layers = state.layers.toMutableList()
             layers[activeIndex] = layer.copy(strokes = emptyList())
-            state.copy(layers = layers, undoStack = emptyList())
+            state.copy(layers = layers, undoStack = emptyList(), strokesVersion = state.strokesVersion + 1)
         }
     }
 
@@ -170,7 +203,7 @@ class PenViewModel @Inject constructor() : ViewModel() {
             if (state.layers.size <= 1) return@update state
             val layers = state.layers.toMutableList().also { it.removeAt(state.activeLayerIndex) }
             val newIndex = state.activeLayerIndex.coerceAtMost(layers.size - 1)
-            state.copy(layers = layers, activeLayerIndex = newIndex)
+            state.copy(layers = layers, activeLayerIndex = newIndex, strokesVersion = state.strokesVersion + 1)
         }
     }
 
@@ -187,7 +220,7 @@ class PenViewModel @Inject constructor() : ViewModel() {
             val layers = state.layers.toMutableList()
             val layer = layers[index]
             layers[index] = layer.copy(visible = !layer.visible)
-            state.copy(layers = layers)
+            state.copy(layers = layers, strokesVersion = state.strokesVersion + 1)
         }
     }
 
@@ -199,7 +232,8 @@ class PenViewModel @Inject constructor() : ViewModel() {
             layers.add(layer)
             state.copy(
                 layers = layers,
-                activeLayerIndex = layers.size - 1
+                activeLayerIndex = layers.size - 1,
+                strokesVersion = state.strokesVersion + 1
             )
         }
     }

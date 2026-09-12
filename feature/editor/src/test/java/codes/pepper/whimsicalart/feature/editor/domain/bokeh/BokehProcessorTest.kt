@@ -1,9 +1,13 @@
 package codes.pepper.whimsicalart.feature.editor.domain.bokeh
 
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
 import kotlin.math.abs
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -177,6 +181,330 @@ class BokehProcessorTest {
             for (y in 0 until h) {
                 assertEquals("foreground must stay sharp at ($x,$y)", Color.BLACK, out.getPixel(x, y))
             }
+        }
+    }
+
+    @Test
+    fun should_return_the_source_untouched_when_the_blur_radius_is_zero() {
+        val w = 16
+        val h = 8
+        val src = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val px = IntArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) px[y * w + x] = if (x < w / 2) Color.BLACK else Color.WHITE
+        }
+        src.setPixels(px, 0, w, 0, 0, w, h)
+        val mask = foregroundLeftMask(w, h, foregroundWidth = w / 2)
+
+        val out = BokehProcessor().applyBackgroundBlur(src, mask, blurRadius = 0f)
+
+        assertEquals(src.width, out.width)
+        assertEquals(src.height, out.height)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                assertEquals("pixel ($x,$y) must stay identical at radius 0", src.getPixel(x, y), out.getPixel(x, y))
+            }
+        }
+    }
+
+    @Test
+    fun should_blur_more_for_a_bigger_radius_and_keep_the_subject_sharp_at_every_radius() {
+        val w = 16
+        val h = 8
+        val src = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val px = IntArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) px[y * w + x] = if (x < w / 2) Color.BLACK else Color.WHITE
+        }
+        src.setPixels(px, 0, w, 0, 0, w, h)
+        val mask = foregroundLeftMask(w, h, foregroundWidth = w / 2)
+
+        val r1 = BokehProcessor().applyBackgroundBlur(src, mask, blurRadius = 1f)
+        val r40 = BokehProcessor().applyBackgroundBlur(src, mask, blurRadius = 40f)
+        val w40 = BokehProcessor().applyBackgroundBlur(src, mask, blurRadius = 40f, bokehShape = BokehShape.HEART)
+
+        for (radius in listOf(r1, r40, w40)) {
+            for (x in 0 until w / 2) {
+                for (y in 0 until h) {
+                    assertEquals("subject must stay sharp at ($x,$y)", Color.BLACK, radius.getPixel(x, y))
+                }
+            }
+        }
+
+        assertTrue("radius 1 still feathers the edge", red(r1.getPixel(w / 2, h / 2)) < 255)
+        assertTrue(
+            "radius 40 pulls the far background closer to the mean than radius 1: " +
+                "r1=${red(r1.getPixel(w - 1, h / 2))} r40=${red(r40.getPixel(w - 1, h / 2))}",
+            red(r40.getPixel(w - 1, h / 2)) < red(r1.getPixel(w - 1, h / 2))
+        )
+        assertTrue(
+            "radius 40 blends the whole width toward the mean (darker than the white far edge)",
+            red(r40.getPixel(w - 1, h / 2)) < 255
+        )
+    }
+
+    @Test
+    fun should_fade_the_blur_a_few_pixels_inward_from_the_subject_boundary() {
+        val w = 16
+        val h = 8
+        val src = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val px = IntArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) px[y * w + x] = if (x < w / 2) Color.BLACK else Color.WHITE
+        }
+        src.setPixels(px, 0, w, 0, 0, w, h)
+        val mask = foregroundLeftMask(w, h, foregroundWidth = w / 2)
+
+        val out = BokehProcessor().applyBackgroundBlur(src, mask, blurRadius = 2f, softEdgeWidth = 4)
+
+        // Deep subject core (>= bandWidth from the path) stays exactly sharp.
+        for (x in 0 until w / 2 - 4) {
+            for (y in 0 until h) {
+                assertEquals("subject core must stay sharp at ($x,$y)", Color.BLACK, out.getPixel(x, y))
+            }
+        }
+        // The few-px band just inside the path mixes the blurred background
+        // into the subject edge with a monotonic ramp: luma decreases (toward
+        // the pure source black) as the distance from the boundary grows.
+        val row = h / 2
+        val b7 = red(out.getPixel(7, row))
+        val b6 = red(out.getPixel(6, row))
+        val b5 = red(out.getPixel(5, row))
+        assertTrue(
+            "band must be a monotonic source<-background ramp (b7=$b7 b6=$b6 b5=$b5)",
+            b7 > b6 && b6 >= b5 && b6 > 0
+        )
+        // Fully-background pixels just past the path stay blurred (not the
+        // sharp white source).
+        for (x in w / 2 until w / 2 + 2) {
+            assertTrue("background pixel x=$x must stay blurred", red(out.getPixel(x, row)) < 255)
+        }
+    }
+
+    @Test
+    fun `shaped bokeh disc radius is a fraction of the short edge, not a fixed 2px`() {
+        // One effect, two scales: a 2px disc disappears at full size (0.05% of a
+        // 4000px image vs 0.4% of a 500px preview). The radius scales with the
+        // live image, keeping the shaped highlights equally visible.
+        val processor = BokehProcessor()
+        assertEquals(1.25f, processor.bokehDiscRadius(500), 1e-3f)
+        assertEquals(5f, processor.bokehDiscRadius(2000), 1e-3f)
+        assertTrue(
+            "full-size disc keeps a visible reach",
+            processor.bokehDiscRadius(4000) > processor.bokehDiscRadius(500) * 4
+        )
+    }
+
+    @Test
+    fun `portrait subject mask renders the soft band without reading the depth map out of bounds`() {
+        // The mask is taller than wide (maskH > maskW) — the exact shape that
+        // previously indexed the depth map as edge[my * maskH + mx] (height
+        // stride) and crashed with ArrayIndexOutOfBoundsException once the row
+        // index pushed the flat index past maskW * maskH.
+        val w = 24
+        val h = 48
+        val src = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val px = IntArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) px[y * w + x] = if (x < w / 2) Color.BLACK else Color.WHITE
+        }
+        src.setPixels(px, 0, w, 0, 0, w, h)
+        val mask = foregroundLeftMask(w, h, foregroundWidth = w / 2)
+
+        val out = BokehProcessor().applyBackgroundBlur(src, mask, blurRadius = 2f, softEdgeWidth = 4)
+
+        // Subject core (>= bandWidth from the path) stays exactly sharp.
+        for (x in 0 until w / 2 - 4) {
+            for (y in 0 until h) {
+                assertEquals("subject core must stay sharp at ($x,$y)", Color.BLACK, out.getPixel(x, y))
+            }
+        }
+        // The band ramp inward from the path column (w/2 - 1): the blurred
+        // background mixes in monotonically toward the pure source black — at
+        // the path the blend factor is 0 (full blur), growing to 1 (full
+        // source) by bandWidth columns in.
+        val row = h / 2
+        val bPath = red(out.getPixel(w / 2 - 1, row))
+        val bIn1 = red(out.getPixel(w / 2 - 2, row))
+        val bIn2 = red(out.getPixel(w / 2 - 3, row))
+        val bIn3 = red(out.getPixel(w / 2 - 4, row))
+        assertTrue(
+            "band must be monotonic inward (path=$bPath in1=$bIn1 in2=$bIn2 in3=$bIn3)",
+            bPath > bIn1 && bIn1 > bIn2 && bIn2 > bIn3 && bIn3 > 0
+        )
+        // Fully-background pixels just past the path stay blurred (not the
+        // sharp white source).
+        for (x in w / 2 until w / 2 + 2) {
+            assertTrue("background pixel x=$x must stay blurred", red(out.getPixel(x, row)) < 255)
+        }
+    }
+
+    @Test
+    fun `portrait and landscape subject masks produce an identical soft-edge ramp`() {
+        // Locks the depth-map stride in BOTH directions: the edge ramp results
+        // must be identical whether the mask is 24x48 (portrait) or 48x24
+        // (landscape) with the same boundary pattern — a stride bug in either
+        // orientation would shift one of the ramps.
+        val pW = 24
+        val pH = 48
+        val srcP = Bitmap.createBitmap(pW, pH, Bitmap.Config.ARGB_8888)
+        val pxP = IntArray(pW * pH)
+        for (y in 0 until pH) {
+            for (x in 0 until pW) pxP[y * pW + x] = if (x < pW / 2) Color.BLACK else Color.WHITE
+        }
+        srcP.setPixels(pxP, 0, pW, 0, 0, pW, pH)
+        val maskP = foregroundLeftMask(pW, pH, foregroundWidth = pW / 2)
+
+        val lW = 48
+        val lH = 24
+        val srcL = Bitmap.createBitmap(lW, lH, Bitmap.Config.ARGB_8888)
+        val pxL = IntArray(lW * lH)
+        for (y in 0 until lH) {
+            for (x in 0 until lW) pxL[y * lW + x] = if (x < lW / 2) Color.BLACK else Color.WHITE
+        }
+        srcL.setPixels(pxL, 0, lW, 0, 0, lW, lH)
+        val maskL = foregroundLeftMask(lW, lH, foregroundWidth = lW / 2)
+
+        val outP = BokehProcessor().applyBackgroundBlur(srcP, maskP, blurRadius = 2f, softEdgeWidth = 4)
+        val outL = BokehProcessor().applyBackgroundBlur(srcL, maskL, blurRadius = 2f, softEdgeWidth = 4)
+
+        // Profile columns relative to the boundary path (the last subject
+        // column): the ramp reads the same pixels in both orientations.
+        val pRow = pH / 2
+        val lRow = lH / 2
+        for (i in 0 until 4) {
+            val pCol = pW / 2 - 1 - i
+            val lCol = lW / 2 - 1 - i
+            val expected = outL.getPixel(lCol, lRow)
+            assertEquals(
+                "ramp pixel i=$i (p=$pCol, l=$lCol) must match across orientations",
+                expected,
+                outP.getPixel(pCol, pRow)
+            )
+        }
+    }
+
+    @Test
+    fun `radius zero returns the original reference, not a copy`() {
+        // Mirrors 0b61c12: applyBackgroundBlur never mutates `original` on the
+        // blurRadius<=0 path, and every caller now gates on `!==` before drawing
+        // or recycling the returned bitmap, so the shared reference skips a full
+        // alloc+copy per zero-intensity preview/commit publish.
+        val w = 16
+        val h = 8
+        val src = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val px = IntArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) px[y * w + x] = if (x < w / 2) Color.BLACK else Color.WHITE
+        }
+        src.setPixels(px, 0, w, 0, 0, w, h)
+        val mask = foregroundLeftMask(w, h, foregroundWidth = w / 2)
+
+        val out = BokehProcessor().applyBackgroundBlur(src, mask, blurRadius = 0f)
+
+        assertSame(src, out)
+        assertEquals("the shared reference is not mutated downstream", Color.BLACK, out.getPixel(0, h / 2))
+    }
+
+    @Test
+    fun `blurBitmap caches per input bitmap identity and radius`() {
+        // The 4-pass separable blur is the dominant bokeh background cost and is
+        // recomputed on every radius-stable preview drag tick; memoizing on
+        // (bitmap identity, radius) like SoftEdgeBand.depthCache turns the hot
+        // path into pure lookups. Retains a bounded number of results per input.
+        val src = stepRow(8, 4)
+        val other = stepRow(8, 4)
+        val processor = BokehProcessor()
+
+        val a = processor.blurBitmap(src, 2f)
+        val b = processor.blurBitmap(src, 2f)
+        assertSame("same input + radius must hit the cache", a, b)
+
+        val c = processor.blurBitmap(src, 4f)
+        val d = processor.blurBitmap(src, 4f)
+        assertSame("a new radius computes once then caches", c, d)
+        assertTrue("different radius must not alias the first entry", c !== a)
+
+        val e = processor.blurBitmap(other, 2f)
+        assertTrue("different bitmap identity must recompute", e !== a)
+    }
+
+    @Test
+    fun `shaped highlight pass reads batched composited pixels, byte-identical to the per-pixel scan`() {
+        // The fix reads the freshly composited pixel array (one getPixels batch)
+        // instead of one result.getPixel JNI call per pixel and hoists the disc
+        // radius out of the loop. With well-separated bright low-contrast
+        // highlights in the sharp subject no drawn disc re-influences a later
+        // read, so the fast path must be byte-identical to the old per-pixel
+        // canvas scan (control below: live getPixel reads + per-highlight radius).
+        val w = 48
+        val h = 32
+        val src = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val px = IntArray(w * h) { Color.rgb(50, 40, 36) }
+        px[8 * w + 8] = Color.rgb(240, 236, 232)
+        px[16 * w + 24] = Color.rgb(244, 238, 232)
+        src.setPixels(px, 0, w, 0, 0, w, h)
+        val mask = foregroundLeftMask(w, h, foregroundWidth = w * 3 / 4)
+
+        val processor = BokehProcessor()
+        val fast = processor.applyBackgroundBlur(src, mask, blurRadius = 2f, bokehShape = BokehShape.HEXAGON)
+        // CIRCLE skips the highlight pass, exposing the freshly composited base.
+        val base = processor.applyBackgroundBlur(src, mask, blurRadius = 2f, bokehShape = BokehShape.CIRCLE)
+        val control = perPixelShapeHighlights(base, BokehShape.HEXAGON)
+
+        val fastPx = IntArray(w * h)
+        val controlPx = IntArray(w * h)
+        fast.getPixels(fastPx, 0, w, 0, 0, w, h)
+        control.getPixels(controlPx, 0, w, 0, 0, w, h)
+        for (i in 0 until w * h) {
+            assertEquals("pixel ${i % w},${i / w}", controlPx[i], fastPx[i])
+        }
+    }
+
+    /**
+     * Reference clone of the PREVIOUS applyShapeHighlights: per-pixel live canvas
+     * reads, per-highlight radius computation. Used to prove the batched-array
+     * rewrite is byte-identical on inputs where discs do not overlap later reads.
+     */
+    private fun perPixelShapeHighlights(base: Bitmap, shape: BokehShape): Bitmap {
+        val result = base.copy(Bitmap.Config.ARGB_8888, true)
+        val w = result.width
+        val h = result.height
+        val canvas = Canvas(result)
+        val processor = BokehProcessor()
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val c = result.getPixel(x, y)
+                val r = Color.red(c); val g = Color.green(c); val b = Color.blue(c)
+                val max = maxOf(r, g, b)
+                val min = minOf(r, g, b)
+                val luma = (r * 0.3f + g * 0.59f + b * 0.11f)
+                if (luma > 200f && (max - min) < 70) {
+                    val radius = processor.bokehDiscRadius(minOf(w, h))
+                    drawDiscClone(canvas, x.toFloat(), y.toFloat(), radius, shape, Color.argb(120, r, g, b))
+                }
+            }
+        }
+        return result
+    }
+
+    /** Clone of BokehProcessor.drawBokehDisc (hexagon path used by the parity test). */
+    private fun drawDiscClone(canvas: Canvas, cx: Float, cy: Float, radius: Float, shape: BokehShape, color: Int) {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color }
+        when (shape) {
+            BokehShape.HEXAGON -> {
+                val path = Path()
+                val n = 6
+                for (i in 0 until n) {
+                    val angle = Math.toRadians((60 * i - 30).toDouble())
+                    val x = cx + (radius * kotlin.math.cos(angle)).toFloat()
+                    val y = cy + (radius * kotlin.math.sin(angle)).toFloat()
+                    if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                }
+                path.close()
+                canvas.drawPath(path, paint)
+            }
+            BokehShape.HEART, BokehShape.CIRCLE -> Unit
         }
     }
 }

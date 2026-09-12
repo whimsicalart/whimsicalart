@@ -1,5 +1,6 @@
 package codes.pepper.whimsicalart.feature.editor.domain
 
+import android.app.Activity
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -10,6 +11,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import androidx.documentfile.provider.DocumentFile
 import dagger.hilt.android.qualifiers.ApplicationContext
 import codes.pepper.whimsicalart.feature.editor.domain.superres.SuperResolutionUpscaler
 import java.io.File
@@ -61,7 +63,14 @@ data class SaveConfig(
     val format: ImageFormat = ImageFormat.JPEG,
     val quality: ImageQuality = ImageQuality.HIGH,
     val resolution: Resolution = Resolution.ORIGINAL,
-    val album: String = "WhimsicalArt"
+    val album: String = "WhimsicalArt",
+    /**
+     * Optional SAF tree Uri picked through the save dialog's folder browser. When
+     * present, the file is written into that tree (via [DocumentFile]); otherwise
+     * the file lands in MediaStore's `Pictures/<album>` (or external storage on
+     * pre-Q). See docs/user_guide.md → Save and share.
+     */
+    val directory: Uri? = null
 )
 
 @Singleton
@@ -77,6 +86,9 @@ class ImageSaver @Inject constructor(
         val toSave = scaleForResolution(bitmap, config.resolution)
 
         return when {
+            config.directory != null -> {
+                saveToDirectory(toSave, config, actualFilename)
+            }
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> {
                 saveToMediaStore(toSave, config, actualFilename)
             }
@@ -84,6 +96,39 @@ class ImageSaver @Inject constructor(
                 saveToExternalStorage(toSave, config, actualFilename)
             }
         }
+    }
+
+    /**
+     * Writes [bitmap] into the SAF tree the user picked in the save dialog
+     * (docs/user_guide.md → Save and share). The tree owns its permissions (the
+     * picker grants persistable read/write, remembered by the dialog), so this
+     * works on every API level with no storage permission.
+     */
+    private fun saveToDirectory(
+        bitmap: Bitmap,
+        config: SaveConfig,
+        filename: String
+    ): Uri? {
+        val treeUri = config.directory ?: return null
+        val root = DocumentFile.fromTreeUri(context, treeUri) ?: return null
+        val mimeType = when (config.format) {
+            ImageFormat.JPEG -> "image/jpeg"
+            ImageFormat.PNG -> "image/png"
+        }
+        val extension = when (config.format) {
+            ImageFormat.JPEG -> ".jpg"
+            ImageFormat.PNG -> ".png"
+        }
+        val name = "$filename$extension"
+        val file = root.findFile(name) ?: root.createFile(mimeType, name) ?: return null
+        context.contentResolver.openOutputStream(file.uri)?.use { outputStream ->
+            when (config.format) {
+                ImageFormat.JPEG -> flattenJpeg(bitmap)
+                    .compress(Bitmap.CompressFormat.JPEG, config.quality.value, outputStream)
+                ImageFormat.PNG -> bitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)
+            }
+        }
+        return file.uri
     }
 
     private fun scaleForResolution(bitmap: Bitmap, resolution: Resolution): Bitmap {
@@ -187,25 +232,52 @@ class ImageSaver @Inject constructor(
         return out
     }
 
-    fun shareImage(bitmap: Bitmap, config: SaveConfig, context: Context) {
-        val scaled = scaleForResolution(bitmap, config.resolution)
-        val file = File(context.cacheDir, "share_image.jpg")
-        FileOutputStream(file).use { outputStream ->
-            scaled.compress(Bitmap.CompressFormat.JPEG, config.quality.value, outputStream)
-        }
+    /**
+     * Compresses [bitmap] to a cache JPEG and fires the system share chooser.
+     * Returns whether the chooser actually launched — the editor clears its
+     * unsaved-changes signal only when the share sheet appears (a chooser that
+     * fails to launch leaves the edits unshared and must NOT clear the signal).
+     */
+    fun shareImage(bitmap: Bitmap, config: SaveConfig, context: Context): Boolean {
+        return runCatching {
+            val scaled = scaleForResolution(bitmap, config.resolution)
+            val file = File(context.cacheDir, "share_image.jpg")
+            FileOutputStream(file).use { outputStream ->
+                scaled.compress(Bitmap.CompressFormat.JPEG, config.quality.value, outputStream)
+            }
 
-        val uri = androidx.core.content.FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.fileprovider",
-            file
-        )
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                file
+            )
 
+            startShareChooser(uri, context)
+        }.isSuccess
+    }
+
+    /**
+     * Launches the system share chooser for [uri]. The editor shares from the
+     * APPLICATION context (EditorViewModel holds `@ApplicationContext`), which is
+     * not an Activity: a chooser launched from a Context outside an activity needs
+     * the NEW_TASK task-affinity flag or `startActivity()` throws
+     * `AndroidRuntimeException` ("Calling startActivity() from outside of an
+     * Activity context requires the FLAG_ACTIVITY_NEW_TASK flag"). An activity
+     * context must NOT get the flag (it would create a spurious task / break the
+     * normal result flow) — hence the [Activity] guard.
+     */
+    fun startShareChooser(uri: Uri, context: Context) {
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
             type = "image/jpeg"
             putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
-        context.startActivity(Intent.createChooser(shareIntent, "Share Photo"))
+        val chooser = Intent.createChooser(shareIntent, "Share Photo")
+        if (context !is Activity) {
+            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+
+        context.startActivity(chooser)
     }
 }

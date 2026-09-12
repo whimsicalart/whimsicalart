@@ -120,4 +120,32 @@ class FilterPresetsTest {
         assertTrue("Lens and colour filter sets must not overlap", lens.intersect(color).isEmpty())
         FilterPresets.lensFilters.forEach { assertTrue(FilterPresets.isLensFilter(it.id)) }
     }
+
+    @Test
+    fun `real-pass lens filters are all registered lens filters`() {
+        assertTrue(FilterPresets.realPassLensFilterIds.isNotEmpty())
+        FilterPresets.realPassLensFilterIds.forEach {
+            assertTrue("$it must be a registered lens filter", FilterPresets.isLensFilter(it))
+        }
+        assertTrue("red-eye must be a real-pass lens filter", FilterPresets.isRealPassLensFilter("red_eye"))
+        assertTrue("star must be a real-pass lens filter", FilterPresets.isRealPassLensFilter("star"))
+        assertTrue("anamorphic must be a real-pass lens filter", FilterPresets.isRealPassLensFilter("anamorphic"))
+        assertTrue("astro must be a real-pass lens filter", FilterPresets.isRealPassLensFilter("astro"))
+        assertFalse("clear is a matrix lens filter, not a real pass", FilterPresets.isRealPassLensFilter("clear"))
+    }
+
+    @Test
+    fun `concatFilterMatrices excludes real-pass lens filters`() {
+        // Real-pass filters must not contribute a matrix approximation: the
+        // renderer applies the real pixel pass instead.
+        assertNull(
+            "a bare real-pass lens filter must not produce a matrix",
+            FilterPresets.concatFilterMatrices(null, setOf("star"))
+        )
+        assertEquals(20, FilterPresets.concatFilterMatrices("vintage", setOf("star"))?.size)
+        assertNull(
+            "a mixed real-pass-only selection produces no matrix",
+            FilterPresets.concatFilterMatrices(null, setOf("red_eye", "astro"))
+        )
+    }
 }

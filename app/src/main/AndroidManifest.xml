@@ -40,6 +40,21 @@
                 <data android:mimeType="image/*" />
             </intent-filter>
         </activity>
+
+        <!-- Serves context.cacheDir/share_image.jpg to the system share sheet
+             (ImageSaver.shareImage). ${applicationId} resolves to
+             codes.pepper.whimsicalart on release and codes.pepper.whimsicalart.debug
+             on debug builds, matching the "${context.packageName}.fileprovider"
+             authority ImageSaver constructs. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>

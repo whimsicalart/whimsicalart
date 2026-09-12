@@ -12,9 +12,10 @@ data class SceneLabel(
 )
 
 /**
- * On-device scene labeler. The concrete implementation wraps ML Kit Image
- * Labeling and can only run on a real device/emulator (native runtime), so it is
- * isolated behind this interface and unit tests target the pure [TagTransformer].
+ * On-device scene labeler. The concrete implementation wraps MediaPipe Tasks
+ * (LiteRT) image classification and can only run on a real device/emulator
+ * (native runtime), so it is isolated behind this interface and unit tests
+ * target the pure [TagTransformer].
  */
 interface SceneClassifier {
     suspend fun label(bitmap: Bitmap): List<SceneLabel>

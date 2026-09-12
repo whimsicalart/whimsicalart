@@ -41,6 +41,7 @@ dependencies {
     implementation(project(":core:designsystem"))
     implementation(project(":core:domain"))
     implementation(project(":core:data"))
+    implementation(project(":core:common"))
     implementation(project(":feature:filters"))
     implementation(project(":feature:stickers"))
     implementation(project(":feature:beauty"))
@@ -57,11 +58,14 @@ dependencies {
     implementation(libs.compose.material.icons.extended)
     
     implementation(libs.coil.compose)
+    implementation(libs.androidx.documentfile)
     implementation(libs.litert)
-    implementation(libs.mlkit.face.detection)
-    implementation(libs.mlkit.text.recognition)
+    implementation(libs.mediapipe.tasks.vision)
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)
+    testImplementation(platform(libs.compose.bom))
+    testImplementation(libs.compose.ui.test.junit4)
+    debugImplementation(libs.compose.ui.test.manifest)
 
 }

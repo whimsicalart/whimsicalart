@@ -26,16 +26,20 @@ action=start
 while [ $# -gt 0 ]; do
   case "$1" in
   tablet)
-    skin=1600x2560
+    skin=1600x2560 # 10:16
     dpi=320
   ;;
   phone)
-    skin=1080x2340
+    skin=1080x2340 # 9:19.5
     dpi=440
   ;;
-  pocket|small)
-    skin=720x1280
-    dpi=320
+  small)
+    skin=720x1280 # 9:16
+    dpi=400
+  ;;
+  pocket|smaller)
+    skin=441x980 # 9:20
+    dpi=400
   ;;
   vnc)
     with_vnc=1
@@ -44,7 +48,7 @@ while [ $# -gt 0 ]; do
     action=stop
   ;;
   *)
-    printf '!! Unknown argument "%s" (expected: notest | nolint)\n' "$1" >&2
+    printf '!! Unknown argument "%s"\n' "$1" >&2
     exit 1
   ;;
   esac

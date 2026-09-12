@@ -2,8 +2,22 @@ Background subject segmentation model
 ========================================
 
 File: selfie_segmenter.tflite
-Source: MediaPipe Selfie Segmentation model (person/background segmentation)
-URL: https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite
+Source: DeepLabV3 (MobileNetV2) semantic person-segmentation model from the
+TensorFlow Lite hosted-model catalogue (21-class PASCAL VOC, person = class 15)
+URL: https://storage.googleapis.com/download.tensorflow.org/models/tflite/gpu/deeplabv3_257_mv_gpu.tflite
+
+The MobileNetV2 backbone was trained by the TensorFlow models ("deep lab")
+team and is distributed by Google under the Apache License, Version 2.0.
+
+Face detection model
+====================
+
+File: face_detector.tflite
+Source: MediaPipe BlazeFace short-range face detector (Task-bundle model)
+URL: https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite
+
+The BlazeFace model is distributed by Google under the Apache License,
+Version 2.0.
 
 Licensed under the Apache License, Version 2.0 (the "License").
 You may obtain a copy of the License at

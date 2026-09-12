@@ -2,10 +2,15 @@ package codes.pepper.whimsicalart.feature.editor
 
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import codes.pepper.whimsicalart.feature.editor.ui.text.TextAlignment
-import codes.pepper.whimsicalart.feature.editor.ui.text.TextFont
+import androidx.compose.ui.unit.Density
+import codes.pepper.whimsicalart.feature.editor.domain.TextAlignment
+import codes.pepper.whimsicalart.feature.editor.domain.TextBackgroundShape
+import codes.pepper.whimsicalart.feature.editor.domain.TextFont
+import codes.pepper.whimsicalart.feature.editor.domain.TextItem
+import codes.pepper.whimsicalart.feature.editor.domain.TextStyleFlag
 import codes.pepper.whimsicalart.feature.editor.ui.text.TextOverlay
-import codes.pepper.whimsicalart.feature.editor.ui.mosaic.MosaicBrushType
+import codes.pepper.whimsicalart.feature.editor.ui.text.toTextItem
+import codes.pepper.whimsicalart.feature.editor.ui.text.toTextOverlay
 import codes.pepper.whimsicalart.feature.editor.ui.mosaic.MosaicStroke
 import org.junit.Assert.*
 import org.junit.Test
@@ -24,10 +29,9 @@ class TextOverlayTest {
             fontSize = 24f,
             color = Color.White,
             rotation = 0f,
-            scaleX = 1f,
-            scaleY = 1f,
+            scale = 1f,
             hasShadow = false,
-            hasStroke = false,
+            hasOutline = false,
             alignment = TextAlignment.CENTER
         )
 
@@ -48,10 +52,9 @@ class TextOverlayTest {
             fontSize = 24f,
             color = Color.White,
             rotation = 0f,
-            scaleX = 1f,
-            scaleY = 1f,
+            scale = 1f,
             hasShadow = false,
-            hasStroke = false,
+            hasOutline = false,
             alignment = TextAlignment.CENTER
         )
 
@@ -65,10 +68,11 @@ class TextOverlayTest {
 
     @Test
     fun `textAlignment enum values`() {
-        assertEquals(3, TextAlignment.entries.size)
+        assertEquals(4, TextAlignment.entries.size)
         assertNotNull(TextAlignment.LEFT)
         assertNotNull(TextAlignment.CENTER)
         assertNotNull(TextAlignment.RIGHT)
+        assertEquals(TextAlignment.JUSTIFIED, TextAlignment.entries.last())
     }
 
     @Test
@@ -80,6 +84,103 @@ class TextOverlayTest {
         assertEquals("Sans Serif", TextFont.SANS_SERIF.displayName)
         assertEquals("Handwriting", TextFont.HANDWRITING.displayName)
     }
+
+    @Test
+    fun `textOverlay toTextItem round trips through every param`() {
+        val overlay = TextOverlay(
+            id = "rt-1",
+            text = "Round trip",
+            position = Offset(123.5f, 77.25f),
+            fontSize = 31f,
+            color = Color(0x80FF8800),
+            fontFamily = TextFont.SERIF,
+            style = setOf(TextStyleFlag.BOLD, TextStyleFlag.UNDERLINE),
+            alignment = TextAlignment.RIGHT,
+            scale = 1.4f,
+            rotation = -12f,
+            hasShadow = true,
+            shadowAngle = 200f,
+            shadowDistance = 9.5f,
+            shadowColor = Color(0x55000000),
+            hasOutline = true,
+            outlineSize = 3.25f,
+            outlineColor = Color(0xFF2200AA),
+            outlineBlur = 1.5f,
+            backgroundShape = TextBackgroundShape.PILL,
+            backgroundColor = Color(0x33FFFFFF)
+        )
+        val density = Density(2f)
+        val item = overlay.toTextItem(density, frameWidthPx = 1000f, frameHeightPx = 800f)
+        val restored = item.toTextOverlay(density, frameWidthPx = 1000f, frameHeightPx = 800f)
+
+        assertEquals(overlay.id, restored.id)
+        assertEquals(overlay.text, restored.text)
+        assertEquals(overlay.position.x, restored.position.x, 0.01f)
+        assertEquals(overlay.position.y, restored.position.y, 0.01f)
+        assertEquals(overlay.fontSize, restored.fontSize, 0.01f)
+        assertEquals(overlay.color, restored.color)
+        assertEquals(overlay.fontFamily, restored.fontFamily)
+        assertEquals(overlay.style, restored.style)
+        assertEquals(overlay.alignment, restored.alignment)
+        assertEquals(overlay.scale, restored.scale, 0.0001f)
+        assertEquals(overlay.rotation, restored.rotation, 0.0001f)
+        assertEquals(overlay.hasShadow, restored.hasShadow)
+        assertEquals(overlay.shadowAngle, restored.shadowAngle, 0.01f)
+        assertEquals(overlay.shadowDistance, restored.shadowDistance, 0.01f)
+        assertEquals(overlay.shadowColor, restored.shadowColor)
+        assertEquals(overlay.hasOutline, restored.hasOutline)
+        assertEquals(overlay.outlineSize, restored.outlineSize, 0.01f)
+        assertEquals(overlay.outlineColor, restored.outlineColor)
+        assertEquals(overlay.outlineBlur, restored.outlineBlur, 0.01f)
+        assertEquals(overlay.backgroundShape, restored.backgroundShape)
+        assertEquals(overlay.backgroundColor, restored.backgroundColor)
+    }
+
+    @Test
+    fun `toTextItem normalizes to the box size`() {
+        val overlay = TextOverlay(
+            id = "n-1",
+            text = "Hi",
+            position = Offset(250f, 200f),
+            fontSize = 50f
+        )
+        val item = overlay.toTextItem(Density(1f), frameWidthPx = 1000f, frameHeightPx = 800f)
+        assertEquals(0.25f, item.x, 0.0001f)
+        assertEquals(0.25f, item.y, 0.0001f)
+        assertEquals(0.05f, item.fontSize, 0.0001f)
+        assertEquals(overlay.text, item.text)
+        assertNotNull(item.background)
+    }
+
+    @Test
+    fun `toTextItem normalizes against the fitted image rect and round trips`() {
+        // P2: a letterboxed box (1000x1200, image frame 640x960 at offset 180,120)
+        // must produce source fractions that match what the user painted over the
+        // image, and the restore must land back on the same box position.
+        val overlay = TextOverlay(
+            id = "fr-1",
+            text = "Fit",
+            position = Offset(500f, 600f),
+            fontSize = 60f
+        )
+        val density = Density(1f)
+        val item = overlay.toTextItem(density, 640f, 960f, 180f, 120f)
+        assertEquals(0.5f, item.x, 0.0001f)
+        assertEquals(0.5f, item.y, 0.0001f)
+        assertEquals(60f / 640f, item.fontSize, 0.0001f)
+        val restored = item.toTextOverlay(density, 640f, 960f, 180f, 120f)
+        assertEquals(overlay.position.x, restored.position.x, 0.01f)
+        assertEquals(overlay.position.y, restored.position.y, 0.01f)
+    }
+
+    @Test
+    fun `toTextItem without the letterbox offset equals the unletterboxed box case`() {
+        // Backward-compat: offset 0 + frame == box keeps the old whole-box math.
+        val overlay = TextOverlay(id = "n-2", text = "box", position = Offset(250f, 200f), fontSize = 50f)
+        val item = overlay.toTextItem(Density(1f), 1000f, 800f, 0f, 0f)
+        assertEquals(0.25f, item.x, 0.0001f)
+        assertEquals(0.25f, item.y, 0.0001f)
+    }
 }
 
 @RunWith(RobolectricTestRunner::class)
@@ -90,23 +191,13 @@ class MosaicToolTest {
         val stroke = MosaicStroke(
             id = "stroke-1",
             points = listOf(Offset(0f, 0f), Offset(10f, 10f), Offset(20f, 20f)),
-            brushType = MosaicBrushType.PIXEL,
             brushSize = 20f,
             opacity = 1f
         )
 
         assertEquals("stroke-1", stroke.id)
         assertEquals(3, stroke.points.size)
-        assertEquals(MosaicBrushType.PIXEL, stroke.brushType)
         assertEquals(20f, stroke.brushSize)
         assertEquals(1f, stroke.opacity)
-    }
-
-    @Test
-    fun `mosaicBrushType enum values`() {
-        assertEquals(3, MosaicBrushType.entries.size)
-        assertNotNull(MosaicBrushType.PIXEL)
-        assertNotNull(MosaicBrushType.BLUR)
-        assertNotNull(MosaicBrushType.CUSTOM)
     }
 }

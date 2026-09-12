@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="camera_unavailable">No camera app is available on this device.</string>
+    <string name="camera_storage_unavailable">Unable to create a photo destination. Please try again.</string>
+    <string name="camera_launch_failed">Could not start the camera app.</string>
+</resources>

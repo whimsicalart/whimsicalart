@@ -29,12 +29,13 @@ object MaskFactory {
             mask.eraseColor(Color.TRANSPARENT)
             return mask
         }
-        for (y in 0 until height) {
-            for (x in 0 until width) {
-                val a = (confidence[y * width + x] * scale).toInt().coerceIn(0, 255)
-                mask.setPixel(x, y, Color.argb(a, 255, 255, 255))
-            }
+        // One batched write-out instead of one setPixel per mask pixel (up to
+        // ~66k native calls per 257x257 selfie-matting decode).
+        val pixels = IntArray(width * height)
+        for (i in pixels.indices) {
+            pixels[i] = Color.argb((confidence[i] * scale).toInt().coerceIn(0, 255), 255, 255, 255)
         }
+        mask.setPixels(pixels, 0, width, 0, 0, width, height)
         return mask
     }
 
@@ -61,13 +62,18 @@ object MaskFactory {
      * which side of a pixel is background for effects that do not blend.
      */
     fun threshold(mask: Bitmap, level: Int = 128): Bitmap {
-        val out = Bitmap.createBitmap(mask.width, mask.height, Bitmap.Config.ARGB_8888)
-        for (y in 0 until mask.height) {
-            for (x in 0 until mask.width) {
-                val a = if (Color.alpha(mask.getPixel(x, y)) >= level) 255 else 0
-                out.setPixel(x, y, Color.argb(a, 255, 255, 255))
-            }
+        val width = mask.width
+        val height = mask.height
+        // One batched read + one batched write; the threshold math (alpha
+        // lookup per pixel) is unchanged.
+        val pixels = IntArray(width * height)
+        mask.getPixels(pixels, 0, width, 0, 0, width, height)
+        for (i in pixels.indices) {
+            val a = if (Color.alpha(pixels[i]) >= level) 255 else 0
+            pixels[i] = Color.argb(a, 255, 255, 255)
         }
+        val out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        out.setPixels(pixels, 0, width, 0, 0, width, height)
         return out
     }
 }

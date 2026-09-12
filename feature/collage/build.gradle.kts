@@ -57,7 +57,7 @@ dependencies {
     
     implementation(libs.coil.compose)
 
-    implementation(libs.mlkit.face.detection)
+    implementation(libs.mediapipe.tasks.vision)
 
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)

@@ -7,13 +7,15 @@ import android.net.Uri
 import androidx.compose.ui.geometry.Offset
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import codes.pepper.whimsicalart.feature.editor.domain.mosaic.MlKitFaceRectsDetector
+import codes.pepper.whimsicalart.feature.editor.domain.mosaic.MediaPipeFaceRectsDetector
 import codes.pepper.whimsicalart.feature.editor.domain.mosaic.PrivacyMaskBuilder
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -23,15 +25,13 @@ import kotlinx.coroutines.withContext
 @HiltViewModel
 class MosaicViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val faceDetector: MlKitFaceRectsDetector
+    private val faceDetector: MediaPipeFaceRectsDetector
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(MosaicEditorState())
     val uiState = _uiState.asStateFlow()
 
-    fun selectBrushType(type: MosaicBrushType) {
-        _uiState.update { it.copy(selectedBrushType = type) }
-    }
+    private var debounceJob: Job? = null
 
     fun updateBrushSize(size: Float) {
         _uiState.update { it.copy(brushSize = size) }
@@ -42,11 +42,20 @@ class MosaicViewModel @Inject constructor(
     }
 
     fun toggleErasing() {
-        _uiState.update { it.copy(isErasing = !it.isErasing) }
+        debounceJob?.cancel()
+        _uiState.update { it.copy(isErasing = !it.isErasing, liveMosaicApplied = false) }
     }
 
     fun clear() {
-        _uiState.update { it.copy(strokes = emptyList(), currentStroke = null) }
+        debounceJob?.cancel()
+        _uiState.update {
+            it.copy(
+                strokes = emptyList(),
+                currentStroke = null,
+                liveMosaicApplied = false,
+                strokesVersion = it.strokesVersion + (if (it.strokes.isNotEmpty()) 1 else 0)
+            )
+        }
     }
 
     fun clearSuggestions() {
@@ -56,25 +65,35 @@ class MosaicViewModel @Inject constructor(
     /**
      * Runs face detection on the current image and stores suggested privacy regions
      * (normalized) in state. Safe no-op when no image / no faces / detector fails.
+     * The detection bitmap is decoded DOWN-SAMPLED (long side ≤ [DETECTION_MAX_LONG_SIDE_PX])
+     * so the detector's owned ARGB copy + native working set stay in the low-MB range —
+     * the full-res photo previously produced a ~241 MB allocation and OOM-crashed
+     * (tracker: "Suggest faces (privacy)" CRASHES). Regions are normalized, so the
+     * sampled decode does not shift them.
      */
     fun suggestPrivacyRegions(imageUri: Uri?) {
         if (imageUri == null || _uiState.value.isSuggesting) return
         _uiState.update { it.copy(isSuggesting = true) }
         viewModelScope.launch {
             val snapshot = withContext(Dispatchers.Default) {
-                val uri = imageUri
-                val bitmap = decode(uri)
-                if (bitmap == null) {
-                    emptyList()
-                } else {
-                    try {
-                        val faces = faceDetector.detectFaces(bitmap)
-                        PrivacyMaskBuilder.suggestedRegions(
-                            faces, bitmap.width, bitmap.height
-                        )
-                    } finally {
-                        bitmap.recycle()
+                try {
+                    val bitmap = decodeForDetection(imageUri)
+                    if (bitmap == null) {
+                        emptyList()
+                    } else {
+                        try {
+                            val faces = faceDetector.detectFaces(bitmap)
+                            PrivacyMaskBuilder.suggestedRegions(
+                                faces, bitmap.width, bitmap.height
+                            )
+                        } finally {
+                            bitmap.recycle()
+                        }
                     }
+                } catch (e: OutOfMemoryError) {
+                    // Downsampling is the real fix; an OOM should still degrade to
+                    // "no suggestions" rather than crash the editor.
+                    emptyList()
                 }
             }
             _uiState.update {
@@ -83,56 +102,83 @@ class MosaicViewModel @Inject constructor(
         }
     }
 
-    private fun decode(uri: Uri): Bitmap? = try {
-        context.contentResolver.openInputStream(uri)?.use {
-            BitmapFactory.decodeStream(it)
+    /** Bounds-reading, down-sampled decode for face detection (see [suggestPrivacyRegions]). */
+    private fun decodeForDetection(uri: Uri): Bitmap? = try {
+        val bounds = readBounds(uri) ?: return null
+        val sampleSize = detectionSampleSize(maxOf(bounds.outWidth, bounds.outHeight))
+        context.contentResolver.openInputStream(uri)?.use { stream ->
+            BitmapFactory.decodeStream(stream, null, BitmapFactory.Options().apply {
+                inSampleSize = sampleSize
+            })
+        }
+    } catch (e: Exception) {
+        null
+    }
+
+    private fun readBounds(uri: Uri): BitmapFactory.Options? = try {
+        context.contentResolver.openInputStream(uri)?.use { stream ->
+            BitmapFactory.Options().apply {
+                inJustDecodeBounds = true
+                BitmapFactory.decodeStream(stream, null, this)
+            }.takeIf { it.outWidth > 0 && it.outHeight > 0 }
         }
     } catch (e: Exception) {
         null
     }
 
     override fun onCleared() {
+        debounceJob?.cancel()
         faceDetector.close()
     }
 
     fun onDragStart(position: Offset) {
         _uiState.update { state ->
             if (state.isErasing) {
+                val erased = filterErased(state.strokes, listOf(position), state.brushSize)
                 state.copy(
-                    strokes = filterErased(state.strokes, listOf(position), state.brushSize)
+                    strokes = erased,
+                    liveMosaicApplied = false,
+                    strokesVersion = state.strokesVersion + (if (erased != state.strokes) 1 else 0)
                 )
             } else {
                 state.copy(
                     currentStroke = MosaicStroke(
                         id = UUID.randomUUID().toString(),
                         points = listOf(position),
-                        brushType = state.selectedBrushType,
                         brushSize = state.brushSize,
                         opacity = state.opacity
-                    )
+                    ),
+                    liveMosaicApplied = false
                 )
             }
         }
+        restartDebounce()
     }
 
     fun onDragMove(position: Offset) {
         _uiState.update { state ->
             if (state.isErasing) {
+                val erased = filterErased(state.strokes, listOf(position), state.brushSize)
+                val changed = erased != state.strokes
                 state.copy(
-                    strokes = filterErased(state.strokes, listOf(position), state.brushSize)
+                    strokes = erased,
+                    liveMosaicApplied = false,
+                    strokesVersion = state.strokesVersion + (if (changed) 1 else 0)
                 )
             } else {
-                val current = state.currentStroke ?: return@update state
+                val current = state.currentStroke ?: return@update state.copy(liveMosaicApplied = false)
                 val last = current.points.lastOrNull()
                 if (last != null && (position - last).getDistance() < 3f) {
-                    state
+                    state.copy(liveMosaicApplied = false)
                 } else {
                     state.copy(
-                        currentStroke = current.copy(points = current.points + position)
+                        currentStroke = current.copy(points = current.points + position),
+                        liveMosaicApplied = false
                     )
                 }
             }
         }
+        restartDebounce()
     }
 
     fun onDragEnd() {
@@ -141,10 +187,43 @@ class MosaicViewModel @Inject constructor(
             if (current != null && current.points.isNotEmpty()) {
                 state.copy(
                     strokes = state.strokes + current,
-                    currentStroke = null
+                    currentStroke = null,
+                    liveMosaicApplied = false,
+                    strokesVersion = state.strokesVersion + 1
                 )
             } else {
-                state.copy(currentStroke = null)
+                state.copy(currentStroke = null, liveMosaicApplied = false)
+            }
+        }
+        restartDebounce()
+    }
+
+    /**
+     * (Re)arms the half-second stillness/release debounce (docs/effects_reference.md
+     * → Live-applied brush effects): any resumed stroking cancels the pending
+     * countdown and the real mosaic only fires after a full uninterrupted 500 ms.
+     * Every new stroke motion calls this, so a mid-stroke pause still triggers it
+     * while the very next motion restarts it from zero. When it fires while the
+     * finger is still down, the in-progress stroke is frozen into
+     * [MosaicEditorState.strokes], so the live fold can show the pixelation for it.
+     */
+    private fun restartDebounce() {
+        debounceJob?.cancel()
+        if (_uiState.value.strokes.isEmpty() && _uiState.value.currentStroke == null) return
+        debounceJob = viewModelScope.launch {
+            delay(DEBOUNCE_MS)
+            _uiState.update { state ->
+                val toCommit = state.currentStroke?.takeIf { it.points.isNotEmpty() }
+                val next = if (toCommit != null) {
+                    state.copy(
+                        strokes = state.strokes + toCommit,
+                        currentStroke = null,
+                        strokesVersion = state.strokesVersion + 1
+                    )
+                } else {
+                    state
+                }
+                next.copy(liveMosaicApplied = true)
             }
         }
     }
@@ -158,4 +237,23 @@ class MosaicViewModel @Inject constructor(
             stroke.points.any { p -> points.any { q -> (p - q).getDistance() < radius } }
         }
     }
+
+    private companion object {
+        const val DEBOUNCE_MS = 500L
+    }
+}
+
+/** Detection decode cap: NV21 of a 1280×960 sample ≈ 1.8 MB, far under the device heap. */
+internal const val DETECTION_MAX_LONG_SIDE_PX = 1280
+
+/**
+ * Largest power-of-two [BitmapFactory.Options.inSampleSize] that keeps the image's
+ * LONG side at or under [maxLongSidePx] — pure so the OOM guard is unit-testable.
+ */
+internal fun detectionSampleSize(longSidePx: Int, maxLongSidePx: Int = DETECTION_MAX_LONG_SIDE_PX): Int {
+    var sample = 1
+    while (longSidePx / sample > maxLongSidePx) {
+        sample *= 2
+    }
+    return sample
 }

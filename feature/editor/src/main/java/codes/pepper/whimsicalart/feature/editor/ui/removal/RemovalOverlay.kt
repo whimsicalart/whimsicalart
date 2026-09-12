@@ -24,9 +24,18 @@ fun RemovalOverlay(
     onDragMove: (Offset) -> Unit,
     onDragEnd: () -> Unit,
     modifier: Modifier = Modifier,
-    brushingEnabled: Boolean = true
+    brushingEnabled: Boolean = true,
+    /**
+     * True when the preview is currently showing the real removal result for the
+     * committed strokes, so only the in-progress stroke keeps its brush overlay
+     * (docs/effects_reference.md → Object removal previewing).
+     */
+    showLiveResult: Boolean = false
 ) {
-    val all = currentStroke?.let { strokes + it } ?: strokes
+    val all = when {
+        showLiveResult -> currentStroke?.let { listOf(it) } ?: emptyList()
+        else -> currentStroke?.let { strokes + it } ?: strokes
+    }
 
     Canvas(
         modifier = modifier.then(

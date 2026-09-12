@@ -27,7 +27,15 @@ data class BeautyParams(
     val eyeEnlarge: Float = 0f,
     val nose: Float = 0f,
     val jaw: Float = 0f,
-    val makeupColor: Int = MakeupPalette.colors.first(),
+    // Each colour-bearing sub-tool keeps its OWN remembered colour so picking
+    // one in Lips never moves the selection shown for Blush / Eye Shadow / etc.
+    val lipstickColor: Int = MakeupPalette.colors.first(),
+    val blushColor: Int = MakeupPalette.colors.first(),
+    val eyeShadowColor: Int = MakeupPalette.colors.first(),
+    val eyelinerColor: Int = MakeupPalette.colors.first(),
+    val foundationColor: Int = MakeupPalette.colors.first(),
+    val hairColor: Int = MakeupPalette.colors.first(),
+    val penColor: Int = MakeupPalette.colors.first(),
     val lipstick: Float = 0f,
     val blush: Float = 0f,
     val eyeShadow: Float = 0f,
@@ -69,6 +77,7 @@ object MakeupPalette {
         0xFFAD1457.toInt(),
         0xFF8D6E63.toInt(),
         0xFF66BB6A.toInt(),
-        0xFFFFD600.toInt()
+        0xFFFFD600.toInt(),
+        0xFF000000.toInt()
     )
 }

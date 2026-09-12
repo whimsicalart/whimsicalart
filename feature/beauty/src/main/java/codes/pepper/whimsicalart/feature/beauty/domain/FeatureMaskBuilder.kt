@@ -7,6 +7,7 @@ import android.graphics.RectF
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 /**
  * Builds landmark-anchored closed-path MASKS for the beauty features, replacing
@@ -87,13 +88,31 @@ object FeatureMaskBuilder {
      * Lip mask (outer mouth outline) for lipstick: the lips contour when
      * available, otherwise a mouth-width path with a subtle cupid's-bow top
      * edge and a fuller bottom lip built from the mouth corners.
+     *
+     * When the mouth is OPEN ([isMouthOpen]) the mouth aperture (the inner-lip
+     * ring reused from the teeth-whitening work) is punched OUT of the fill as
+     * a counter-winding-agnostic even-odd hole, so lipstick covers the lips but
+     * never the teeth/mouth interior. A closed or pressed-together mouth has a
+     * near-degenerate aperture and keeps the full fill. [isMouthOpen] ratio
+     * [MOUTH_OPEN_RATIO].
      */
     fun lipMask(
         lipsContour: List<PointF>,
         mouthLeft: PointF?,
-        mouthRight: PointF?
+        mouthRight: PointF?,
+        mouthApertureContour: List<PointF> = emptyList()
     ): Path? {
-        closedPath(lipsContour)?.let { return it }
+        val outer = closedPath(lipsContour) ?: bowLipPath(mouthLeft, mouthRight) ?: return null
+        if (isMouthOpen(mouthApertureContour)) {
+            closedPath(mouthApertureContour)?.let { aperture ->
+                outer.fillType = Path.FillType.EVEN_ODD
+                outer.addPath(aperture)
+            }
+        }
+        return outer
+    }
+
+    private fun bowLipPath(mouthLeft: PointF?, mouthRight: PointF?): Path? {
         if (mouthLeft == null || mouthRight == null) return null
         val cx = (mouthLeft.x + mouthRight.x) / 2f
         val cy = (mouthLeft.y + mouthRight.y) / 2f
@@ -108,6 +127,31 @@ object FeatureMaskBuilder {
         path.close()
         return path
     }
+
+    /** The aperture is a real opening (the mouth is open) at a vertical extent
+     * of at least [MOUTH_OPEN_RATIO] of its width; a pressed-together mouth
+     * leaves a flat, degenerate lens that must not punch a hole in the fill. */
+    fun isMouthOpen(mouthApertureContour: List<PointF>): Boolean {
+        if (mouthApertureContour.size < 3) return false
+        var minX = Float.MAX_VALUE
+        var minY = Float.MAX_VALUE
+        var maxX = -Float.MAX_VALUE
+        var maxY = -Float.MAX_VALUE
+        for (p in mouthApertureContour) {
+            if (p.x < minX) minX = p.x
+            if (p.x > maxX) maxX = p.x
+            if (p.y < minY) minY = p.y
+            if (p.y > maxY) maxY = p.y
+        }
+        val width = maxX - minX
+        val height = maxY - minY
+        if (width <= 0f || height <= 0f) return false
+        // Epsilon absorbs float rounding of `width * MOUTH_OPEN_RATIO` (40f *
+        // 0.1f is 4.00000006, which would deny an exactly-10% opening).
+        return height + 1e-4f >= width * MOUTH_OPEN_RATIO
+    }
+
+    private const val MOUTH_OPEN_RATIO = 0.1f
 
     /**
      * Mouth aperture mask for teeth whitening: the lens-shaped opening between
@@ -133,13 +177,39 @@ object FeatureMaskBuilder {
     }
 
     /**
-     * Teeth-whitening mask: the mouth aperture between the lips. The vertical
-     * band is derived from the lips contour bounding box when available, else
-     * from the mouth corners, and the region is bounded by the mouth corners.
-     * Returns the convex aperture polygon [mouthLeft, top, mouthRight, bottom]
-     * used for an analytic, per-pixel teeth-segmentation alpha mask.
+     * Teeth-whitening mask polygon: the mouth aperture where the teeth show.
+     *
+     * Prefers the MediaPipe Face Mesh **inner-lip ring** (`mouthApertureContour`
+     * — the actual mouth opening), resampled via evenly-spaced subdivision along
+     * the ring's perimeter to a node count proportional to the aperture's pixel
+     * footprint (`clamp(apertureWidthPx / 8, 24, 96)` — dense for wide smiles,
+     * cheap for small mouths), so whitening hugs the teeth instead of the outer
+     * lips. Falls back to the convex aperture polygon [mouthLeft, top,
+     * mouthRight, bottom] (the analytic lens between the mouth corners and the
+     * lip bands) when no inner-lip contour is available.
      */
     fun teethPolygon(
+        lipsContour: List<PointF>,
+        mouthLeft: PointF?,
+        mouthRight: PointF?,
+        mouthApertureContour: List<PointF> = emptyList()
+    ): List<PointF>? {
+        if (mouthApertureContour.size >= 3) {
+            val margin = 1f
+            val width = mouthApertureContour.maxOf { it.x } -
+                mouthApertureContour.minOf { it.x } + margin
+            val target = (width / 8f).roundToInt().coerceIn(24, 96)
+            return resampleRing(mouthApertureContour, target)
+        }
+        return lensPolygon(lipsContour, mouthLeft, mouthRight)
+    }
+
+    /**
+     * Legacy analytic lens: convex aperture polygon [mouthLeft, top, mouthRight,
+     * bottom] between the mouth corners and the lips bands. [teethPolygon] uses
+     * this only as the no-inner-contour fallback.
+     */
+    private fun lensPolygon(
         lipsContour: List<PointF>,
         mouthLeft: PointF?,
         mouthRight: PointF?
@@ -181,16 +251,53 @@ object FeatureMaskBuilder {
     }
 
     /**
+     * Resamples a closed point ring to exactly [target] points, evenly spaced
+     * along the ring's perimeter (midpoint subdivision / decimation by arc
+     * length). This is the teeth-aperture density rule: the ring is denser
+     * when it bounds a wider mouth. Returns the input unchanged when it has
+     * fewer than 3 points, [target] is not positive, or the ring has zero
+     * perimeter length.
+     */
+    internal fun resampleRing(points: List<PointF>, target: Int): List<PointF> {
+        if (target <= 0 || points.size < 3) return points
+        val n = points.size
+        // Prefix arc length: arc[i] is the perimeter distance at vertex i.
+        val arc = FloatArray(n + 1)
+        for (i in 0 until n) {
+            val next = (i + 1) % n
+            val len = hypot(points[next].x - points[i].x, points[next].y - points[i].y)
+            arc[i + 1] = arc[i] + len
+        }
+        val total = arc[n]
+        if (total <= 0f) return points
+        val out = ArrayList<PointF>(target)
+        var seg = 0
+        for (k in 0 until target) {
+            val targetArc = total * k / target
+            while (seg < n && arc[seg + 1] < targetArc) seg++
+            val a0 = arc[seg]
+            val a1 = arc[seg + 1]
+            val f = if (a1 > a0) (targetArc - a0) / (a1 - a0) else 0f
+            val p0 = points[seg]
+            val p1 = points[(seg + 1) % n]
+            out.add(PointF(p0.x + (p1.x - p0.x) * f, p0.y + (p1.y - p0.y) * f))
+        }
+        return out
+    }
+
+    /**
      * Teeth-whitening mask path (the mouth aperture between the lips) used by the
-     * legacy feathered renderer. New callers should prefer [teethPolygon] so the
-     * per-pixel teeth-segmentation alpha mask can test containment analytically.
+     * legacy feathered renderer. New callers should prefer [teethPolygon] +
+     * `TeethMaskProcessor.toothMask` so the per-pixel teeth-segmentation alpha
+     * mask can test containment analytically; this path keeps the convex lens
+     * shape even when an inner-lip ring is present.
      */
     fun teethMask(
         lipsContour: List<PointF>,
         mouthLeft: PointF?,
         mouthRight: PointF?
     ): Path? {
-        val polygon = teethPolygon(lipsContour, mouthLeft, mouthRight) ?: return null
+        val polygon = lensPolygon(lipsContour, mouthLeft, mouthRight) ?: return null
         return mouthAperturePath(
             polygon[0], polygon[2],
             polygon[1].y, polygon[3].y
@@ -234,8 +341,12 @@ object FeatureMaskBuilder {
         fallback: RectF
     ): Path {
         val path = Path()
+        // One effect, two scales: the fallback band's corner roundness is a
+        // fraction of its short edge, so a preview and the full-size fold round
+        // the same relative geometry.
+        val corner = (minOf(fallback.width(), fallback.height()) * 0.04f).coerceAtLeast(1f)
         if (faceContour.isEmpty()) {
-            path.addRoundRect(fallback, 8f, 8f, Path.Direction.CW)
+            path.addRoundRect(fallback, corner, corner, Path.Direction.CW)
             return path
         }
         val cx = fallback.centerX()
@@ -246,7 +357,7 @@ object FeatureMaskBuilder {
         val rightTop = rightSide.minByOrNull { it.y }
         val rightBottom = rightSide.maxByOrNull { it.y }
         if (leftTop == null || leftBottom == null || rightTop == null || rightBottom == null) {
-            path.addRoundRect(fallback, 8f, 8f, Path.Direction.CW)
+            path.addRoundRect(fallback, corner, corner, Path.Direction.CW)
             return path
         }
         path.moveTo(leftTop.x, leftTop.y)

@@ -39,6 +39,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import codes.pepper.whimsicalart.core.designsystem.LocalUiScale
 import codes.pepper.whimsicalart.feature.editor.ui.viewmodel.EditTool
 
 @Composable
@@ -47,12 +48,13 @@ fun EditorToolbar(
     onToolSelected: (EditTool?) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val s = LocalUiScale.current
     Row(
         modifier = modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+            .padding(horizontal = 16.dp * s, vertical = 8.dp * s),
+        horizontalArrangement = Arrangement.spacedBy(8.dp * s)
     ) {
         EditTool.entries.forEach { tool ->
             FilterChip(
@@ -63,17 +65,19 @@ fun EditorToolbar(
                 label = {
                     Text(
                         text = tool.label,
-                        style = MaterialTheme.typography.labelMedium
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontSize = MaterialTheme.typography.labelMedium.fontSize * s
+                        )
                     )
                 },
                 leadingIcon = {
                     Icon(
                         imageVector = tool.icon,
                         contentDescription = null,
-                        modifier = Modifier.size(28.dp)
+                        modifier = Modifier.size(28.dp * s)
                     )
                 },
-                modifier = Modifier.heightIn(min = 48.dp),
+                modifier = Modifier.heightIn(min = 48.dp * s),
                 colors = FilterChipDefaults.filterChipColors(
                     selectedContainerColor = MaterialTheme.colorScheme.primary,
                     selectedLabelColor = MaterialTheme.colorScheme.onPrimary

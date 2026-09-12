@@ -6,6 +6,7 @@ import codes.pepper.whimsicalart.feature.beauty.domain.BeautyGeometry
 import codes.pepper.whimsicalart.feature.beauty.domain.BeautyLayerSpec
 import codes.pepper.whimsicalart.feature.beauty.domain.BeautyProcessor
 import codes.pepper.whimsicalart.feature.beauty.domain.BrushStroke
+import codes.pepper.whimsicalart.feature.beauty.domain.GeometryField
 import codes.pepper.whimsicalart.feature.editor.ui.viewmodel.EditTool
 import java.util.UUID
 
@@ -26,6 +27,17 @@ sealed interface BeautyStackEffect : StackEffect {
 
     override val tool: EditTool get() = EditTool.BEAUTY
 
+    /**
+     * The per-field lazy request this effect needs from the shared geometry
+     * context (docs/effect_stack.md → Shared geometry context): the fold asks
+     * the context for ONLY these fields, so ML stages the tool never consumes
+     * are never run. Default = FACE (every beauty tool keys off the face
+     * detection/mesh); the skin-using tools (auto, smoothing, spots, skin-tone,
+     * foundation) add SKIN; hair color adds HAIR; the manual pen resolves NO
+     * geometry at all (empty set — no ML for it).
+     */
+    val neededFields: Set<GeometryField> get() = setOf(GeometryField.FACE)
+
     /** Returns this effect with [geometry] bound, used when lazily resolving at fold time. */
     fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect
 
@@ -44,9 +56,12 @@ data class BeautyAutoEffect(
     val intensity: Float = 0f,
     private val processor: BeautyProcessor = BeautyProcessor()
 ) : BeautyStackEffect {
+    override var committedPreview: Bitmap? = null
+
     override fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect = copy(geometry = geometry)
     override fun withProcessor(processor: BeautyProcessor): BeautyStackEffect = copy(processor = processor)
     override val layerKey: String get() = "beauty:auto"
+    override val neededFields: Set<GeometryField> get() = setOf(GeometryField.FACE, GeometryField.SKIN)
     override fun render(current: Bitmap, context: Context): Bitmap {
         if (intensity <= 0f) return current
         val g = geometry
@@ -64,9 +79,12 @@ data class BeautySmoothingEffect(
     val intensity: Float = 0f,
     private val processor: BeautyProcessor = BeautyProcessor()
 ) : BeautyStackEffect {
+    override var committedPreview: Bitmap? = null
+
     override fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect = copy(geometry = geometry)
     override fun withProcessor(processor: BeautyProcessor): BeautyStackEffect = copy(processor = processor)
     override val layerKey: String get() = "beauty:smoothing"
+    override val neededFields: Set<GeometryField> get() = setOf(GeometryField.FACE, GeometryField.SKIN)
     override fun render(current: Bitmap, context: Context): Bitmap {
         if (intensity <= 0f) return current
         val g = geometry
@@ -84,6 +102,8 @@ data class BeautyTeethEffect(
     val intensity: Float = 0f,
     private val processor: BeautyProcessor = BeautyProcessor()
 ) : BeautyStackEffect {
+    override var committedPreview: Bitmap? = null
+
     override fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect = copy(geometry = geometry)
     override fun withProcessor(processor: BeautyProcessor): BeautyStackEffect = copy(processor = processor)
     override val layerKey: String get() = "beauty:teeth"
@@ -101,6 +121,8 @@ data class BeautyEyeBrightenEffect(
     val intensity: Float = 0f,
     private val processor: BeautyProcessor = BeautyProcessor()
 ) : BeautyStackEffect {
+    override var committedPreview: Bitmap? = null
+
     override fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect = copy(geometry = geometry)
     override fun withProcessor(processor: BeautyProcessor): BeautyStackEffect = copy(processor = processor)
     override val layerKey: String get() = "beauty:eye_brighten"
@@ -118,6 +140,8 @@ data class BeautyDarkCircleEffect(
     val intensity: Float = 0f,
     private val processor: BeautyProcessor = BeautyProcessor()
 ) : BeautyStackEffect {
+    override var committedPreview: Bitmap? = null
+
     override fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect = copy(geometry = geometry)
     override fun withProcessor(processor: BeautyProcessor): BeautyStackEffect = copy(processor = processor)
     override val layerKey: String get() = "beauty:dark_circles"
@@ -135,9 +159,12 @@ data class BeautySpotEffect(
     val intensity: Float = 0f,
     private val processor: BeautyProcessor = BeautyProcessor()
 ) : BeautyStackEffect {
+    override var committedPreview: Bitmap? = null
+
     override fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect = copy(geometry = geometry)
     override fun withProcessor(processor: BeautyProcessor): BeautyStackEffect = copy(processor = processor)
     override val layerKey: String get() = "beauty:spots"
+    override val neededFields: Set<GeometryField> get() = setOf(GeometryField.FACE, GeometryField.SKIN)
     override fun render(current: Bitmap, context: Context): Bitmap {
         if (intensity <= 0f) return current
         val g = geometry
@@ -153,6 +180,8 @@ data class BeautyWrinkleEffect(
     val intensity: Float = 0f,
     private val processor: BeautyProcessor = BeautyProcessor()
 ) : BeautyStackEffect {
+    override var committedPreview: Bitmap? = null
+
     override fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect = copy(geometry = geometry)
     override fun withProcessor(processor: BeautyProcessor): BeautyStackEffect = copy(processor = processor)
     override val layerKey: String get() = "beauty:wrinkles"
@@ -170,9 +199,12 @@ data class BeautySkinToneEffect(
     val intensity: Float = 0f,
     private val processor: BeautyProcessor = BeautyProcessor()
 ) : BeautyStackEffect {
+    override var committedPreview: Bitmap? = null
+
     override fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect = copy(geometry = geometry)
     override fun withProcessor(processor: BeautyProcessor): BeautyStackEffect = copy(processor = processor)
     override val layerKey: String get() = "beauty:skin_tone"
+    override val neededFields: Set<GeometryField> get() = setOf(GeometryField.FACE, GeometryField.SKIN)
     override fun render(current: Bitmap, context: Context): Bitmap {
         if (intensity == 0f) return current
         val g = geometry
@@ -196,6 +228,8 @@ data class BeautySlimEffect(
     val intensity: Float = 0f,
     private val processor: BeautyProcessor = BeautyProcessor()
 ) : BeautyStackEffect {
+    override var committedPreview: Bitmap? = null
+
     override fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect = copy(geometry = geometry)
     override fun withProcessor(processor: BeautyProcessor): BeautyStackEffect = copy(processor = processor)
     override val layerKey: String get() = "beauty:slim"
@@ -214,6 +248,8 @@ data class BeautyEyeEnlargeEffect(
     val intensity: Float = 0f,
     private val processor: BeautyProcessor = BeautyProcessor()
 ) : BeautyStackEffect {
+    override var committedPreview: Bitmap? = null
+
     override fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect = copy(geometry = geometry)
     override fun withProcessor(processor: BeautyProcessor): BeautyStackEffect = copy(processor = processor)
     override val layerKey: String get() = "beauty:eye_enlarge"
@@ -232,6 +268,8 @@ data class BeautyNoseEffect(
     val intensity: Float = 0f,
     private val processor: BeautyProcessor = BeautyProcessor()
 ) : BeautyStackEffect {
+    override var committedPreview: Bitmap? = null
+
     override fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect = copy(geometry = geometry)
     override fun withProcessor(processor: BeautyProcessor): BeautyStackEffect = copy(processor = processor)
     override val layerKey: String get() = "beauty:nose"
@@ -250,6 +288,8 @@ data class BeautyJawEffect(
     val intensity: Float = 0f,
     private val processor: BeautyProcessor = BeautyProcessor()
 ) : BeautyStackEffect {
+    override var committedPreview: Bitmap? = null
+
     override fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect = copy(geometry = geometry)
     override fun withProcessor(processor: BeautyProcessor): BeautyStackEffect = copy(processor = processor)
     override val layerKey: String get() = "beauty:jaw"
@@ -269,6 +309,8 @@ data class BeautyLipstickEffect(
     val intensity: Float = 0f,
     private val processor: BeautyProcessor = BeautyProcessor()
 ) : BeautyStackEffect {
+    override var committedPreview: Bitmap? = null
+
     override fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect = copy(geometry = geometry)
     override fun withProcessor(processor: BeautyProcessor): BeautyStackEffect = copy(processor = processor)
     override val layerKey: String get() = "beauty:lipstick"
@@ -287,6 +329,8 @@ data class BeautyBlushEffect(
     val intensity: Float = 0f,
     private val processor: BeautyProcessor = BeautyProcessor()
 ) : BeautyStackEffect {
+    override var committedPreview: Bitmap? = null
+
     override fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect = copy(geometry = geometry)
     override fun withProcessor(processor: BeautyProcessor): BeautyStackEffect = copy(processor = processor)
     override val layerKey: String get() = "beauty:blush"
@@ -305,6 +349,8 @@ data class BeautyEyeShadowEffect(
     val intensity: Float = 0f,
     private val processor: BeautyProcessor = BeautyProcessor()
 ) : BeautyStackEffect {
+    override var committedPreview: Bitmap? = null
+
     override fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect = copy(geometry = geometry)
     override fun withProcessor(processor: BeautyProcessor): BeautyStackEffect = copy(processor = processor)
     override val layerKey: String get() = "beauty:eye_shadow"
@@ -323,6 +369,8 @@ data class BeautyEyelinerEffect(
     val intensity: Float = 0f,
     private val processor: BeautyProcessor = BeautyProcessor()
 ) : BeautyStackEffect {
+    override var committedPreview: Bitmap? = null
+
     override fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect = copy(geometry = geometry)
     override fun withProcessor(processor: BeautyProcessor): BeautyStackEffect = copy(processor = processor)
     override val layerKey: String get() = "beauty:eyeliner"
@@ -341,9 +389,12 @@ data class BeautyFoundationEffect(
     val intensity: Float = 0f,
     private val processor: BeautyProcessor = BeautyProcessor()
 ) : BeautyStackEffect {
+    override var committedPreview: Bitmap? = null
+
     override fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect = copy(geometry = geometry)
     override fun withProcessor(processor: BeautyProcessor): BeautyStackEffect = copy(processor = processor)
     override val layerKey: String get() = "beauty:foundation"
+    override val neededFields: Set<GeometryField> get() = setOf(GeometryField.FACE, GeometryField.SKIN)
     override fun render(current: Bitmap, context: Context): Bitmap {
         if (intensity <= 0f) return current
         val g = geometry
@@ -360,9 +411,12 @@ data class BeautyHairEffect(
     val intensity: Float = 0f,
     private val processor: BeautyProcessor = BeautyProcessor()
 ) : BeautyStackEffect {
+    override var committedPreview: Bitmap? = null
+
     override fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect = copy(geometry = geometry)
     override fun withProcessor(processor: BeautyProcessor): BeautyStackEffect = copy(processor = processor)
     override val layerKey: String get() = "beauty:hair"
+    override val neededFields: Set<GeometryField> get() = setOf(GeometryField.FACE, GeometryField.HAIR)
     override fun render(current: Bitmap, context: Context): Bitmap {
         if (intensity <= 0f) return current
         val g = geometry
@@ -377,14 +431,18 @@ data class BeautyPenEffect(
     override val geometry: BeautyGeometry? = null,
     val strokes: List<BrushStroke> = emptyList(),
     val opacity: Float = 1f,
+    val color: Int = android.graphics.Color.WHITE,
     private val processor: BeautyProcessor = BeautyProcessor()
 ) : BeautyStackEffect {
+    override var committedPreview: Bitmap? = null
+
     override fun withGeometry(geometry: BeautyGeometry?): BeautyStackEffect = copy(geometry = geometry)
     override fun withProcessor(processor: BeautyProcessor): BeautyStackEffect = copy(processor = processor)
     override val layerKey: String get() = "beauty:pen"
+    override val neededFields: Set<GeometryField> get() = emptySet()
     override fun render(current: Bitmap, context: Context): Bitmap {
         if (strokes.isEmpty()) return current
-        return processor.applyBrightnessPen(current, strokes, opacity)
+        return processor.applyBrightnessPen(current, strokes, opacity, color)
     }
 }
 
@@ -417,7 +475,11 @@ fun List<BeautyLayerSpec>.toBeautyEffects(): List<BeautyStackEffect> = mapNotNul
         "beauty:eyeliner" -> BeautyEyelinerEffect(color = spec.color, intensity = spec.intensity)
         "beauty:foundation" -> BeautyFoundationEffect(color = spec.color, intensity = spec.intensity)
         "beauty:hair" -> BeautyHairEffect(color = spec.color, intensity = spec.intensity)
-        "beauty:pen" -> BeautyPenEffect(strokes = spec.strokes, opacity = spec.opacity)
+        "beauty:pen" -> BeautyPenEffect(
+            strokes = spec.strokes,
+            opacity = spec.opacity,
+            color = spec.color
+        )
         else -> null
     }
 }

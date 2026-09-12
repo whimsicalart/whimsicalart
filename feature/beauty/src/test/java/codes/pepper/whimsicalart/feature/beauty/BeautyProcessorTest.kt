@@ -20,6 +20,31 @@ class BeautyProcessorTest {
     }
 
     @Test
+    fun `spot removal radius is a fraction of the short edge at every scale`() {
+        // One effect, two scales (docs/effect_stack.md → Preview rendering
+        // model): the same smoothing band fraction must reach the same relative
+        // area at preview and full size — doubling the image doubles the radius.
+        val preview = processor.spotRemovalRadius(500, 0.6f)
+        val full = processor.spotRemovalRadius(4000, 0.6f)
+        assertEquals("a 500px preview keeps the historical band", 6, preview)
+        assertEquals("full-size doubles the band proportionally", preview * 8, full)
+        assertEquals("zero intensity keeps a minimal band", 3, processor.spotRemovalRadius(500, 0f))
+    }
+
+    @Test
+    fun `wrinkle removal radius is a fraction of the short edge at every scale`() {
+        val preview = processor.wrinkleRemovalRadius(500, 0.3f)
+        val full = processor.wrinkleRemovalRadius(4000, 0.3f)
+        assertTrue("a 500px preview keeps a visible band: $preview", preview in 8..10)
+        assertEquals("full-size doubles the band proportionally", preview * 8, full)
+        assertEquals(
+            "the same intensity at the same footprint is scale-independent",
+            processor.wrinkleRemovalRadius(1000, 0.5f) * 4,
+            processor.wrinkleRemovalRadius(4000, 0.5f)
+        )
+    }
+
+    @Test
     fun `createDetectedFace preserves detection values`() {
         val face = DetectedFace(
             bounds = Rect(100, 100, 300, 400),

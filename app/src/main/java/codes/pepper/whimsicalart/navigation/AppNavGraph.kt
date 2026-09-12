@@ -54,7 +54,12 @@ fun AppNavGraph(
         composable(Routes.CAMERA) {
             CameraScreen(
                 onPhotoCaptured = { uri ->
-                    navController.navigate(Routes.editor(uri))
+                    navController.navigate(Routes.editor(uri)) {
+                        // Jump straight into the editor over the camera: popping the
+                        // CAMERA destination keeps back from the editor landing on
+                        // the now-stale capture spinner.
+                        popUpTo(Routes.CAMERA) { inclusive = true }
+                    }
                 },
                 onBack = {
                     navController.popBackStack()
@@ -101,7 +106,17 @@ fun AppNavGraph(
             EditorScreen(
                 imageUri = imageUri,
                 onBack = {
-                    navController.popBackStack()
+                    // When the editor is the START destination (a cold share
+                    // launch) there is nothing to pop — replace it with the
+                    // gallery so backing out of the shared image lands on the
+                    // photo list (whose permission prompt then fires, but only
+                    // at that point). When it was pushed from the gallery/camera
+                    // the normal pop returns there as before.
+                    if (!navController.popBackStack()) {
+                        navController.navigate(Routes.GALLERY) {
+                            popUpTo(navController.graph.id) { inclusive = true }
+                        }
+                    }
                 }
             )
         }

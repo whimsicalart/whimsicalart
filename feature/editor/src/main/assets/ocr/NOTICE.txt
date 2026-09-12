@@ -1,0 +1,22 @@
+WhimsicalArt - OCR engine (PP-OCR + MNN)
+
+The on-device text recognition engine is built from two open-source projects:
+
+1) MNN - an open source neural network inference engine
+   Copyright (C) 2019- Alibaba Group Holding Limited
+   Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+   https://github.com/alibaba/MNN
+   Bundled as prebuilt Android libraries (libmnncore.so / libMNN.so /
+   libc++_shared.so for arm64-v8a and armeabi-v7a, release 3.6.1) and the
+   vendored Java API in com/taobao/android/mnn (derived from MNN's
+   project/android demo, Apache-2.0).
+
+2) PaddleOCR models (ppocr/*.mnn + *_keys.txt)
+   PP-OCRv5 mobile detector/recognizer models and textline orientation
+   classifier, converted to the MNN format and redistributed through the
+   offline-translator project (https://offline-translator.davidv.dev, GPL-3.0
+   app / models under PaddleOCR's licensing).
+   The PP-OCR models themselves are released under the Apache License 2.0 by
+   PaddlePaddle (https://github.com/PaddlePaddle/PaddleOCR).
+
+Apache License 2.0 text: see https://www.apache.org/licenses/LICENSE-2.0

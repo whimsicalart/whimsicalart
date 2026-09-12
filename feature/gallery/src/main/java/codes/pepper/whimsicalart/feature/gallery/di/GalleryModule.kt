@@ -4,7 +4,7 @@ import android.content.ContentResolver
 import android.content.Context
 import codes.pepper.whimsicalart.feature.gallery.data.GalleryRepositoryImpl
 import codes.pepper.whimsicalart.feature.gallery.data.tag.GalleryDatabase
-import codes.pepper.whimsicalart.feature.gallery.data.tag.MlKitImageLabeler
+import codes.pepper.whimsicalart.feature.gallery.data.tag.MediaPipeSceneClassifier
 import codes.pepper.whimsicalart.feature.gallery.data.tag.PhotoTagDao
 import codes.pepper.whimsicalart.feature.gallery.data.tag.RoomTagRepository
 import codes.pepper.whimsicalart.feature.gallery.domain.GalleryRepository
@@ -55,5 +55,7 @@ object GalleryModule {
 
     @Provides
     @Singleton
-    fun provideSceneClassifier(): SceneClassifier = MlKitImageLabeler()
+    fun provideSceneClassifier(
+        @ApplicationContext context: Context
+    ): SceneClassifier = MediaPipeSceneClassifier(context)
 }

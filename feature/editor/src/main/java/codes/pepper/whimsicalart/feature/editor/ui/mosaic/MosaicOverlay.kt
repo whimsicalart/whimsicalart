@@ -6,13 +6,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.input.pointer.pointerInput
+import codes.pepper.whimsicalart.feature.editor.ui.ImageCanvasFrame
 import kotlin.math.abs
 import kotlin.math.ceil
+import kotlin.math.roundToInt
 
 @Composable
 fun MosaicOverlay(
@@ -23,9 +24,24 @@ fun MosaicOverlay(
     onDragMove: (Offset) -> Unit,
     onDragEnd: () -> Unit,
     modifier: Modifier = Modifier,
-    brushingEnabled: Boolean = true
+    brushingEnabled: Boolean = true,
+    /**
+     * True when the preview is currently showing the REAL pixelation for the
+     * committed strokes, so only the in-progress stroke keeps the patterned
+     * stand-in overlay (docs/effects_reference.md → Live-applied brush effects).
+     * The suggested-regions frame stays independent of this folding.
+     */
+    showLiveResult: Boolean = false,
+    /**
+     * The fitted image rect (letterbox offset + size) used only to anchor the
+     * ML suggested-regions guides over the image; stroke capture stays in box px.
+     */
+    imageFrame: ImageCanvasFrame = ImageCanvasFrame.DEFAULT
 ) {
-    val allStrokes = currentStroke?.let { strokes + it } ?: strokes
+    val allStrokes = when {
+        showLiveResult -> currentStroke?.let { listOf(it) } ?: emptyList()
+        else -> currentStroke?.let { strokes + it } ?: strokes
+    }
 
     Canvas(
         modifier = modifier
@@ -48,70 +64,36 @@ fun MosaicOverlay(
             )
     ) {
         suggestedRegions.forEach { region ->
+            val ax = imageFrame.offsetX + region.left * imageFrame.size.width
+            val ay = imageFrame.offsetY + region.top * imageFrame.size.height
             drawRect(
                 color = Color(0x22FFEB3B),
-                topLeft = Offset(region.left * size.width, region.top * size.height),
-                size = Size(region.width() * size.width, region.height() * size.height)
+                topLeft = Offset(ax, ay),
+                size = Size(region.width() * imageFrame.size.width, region.height() * imageFrame.size.height)
             )
             drawRect(
                 color = Color(0x88FFC107),
-                topLeft = Offset(region.left * size.width, region.top * size.height),
-                size = Size(region.width() * size.width, region.height() * size.height),
+                topLeft = Offset(ax, ay),
+                size = Size(region.width() * imageFrame.size.width, region.height() * imageFrame.size.height),
                 style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f)
             )
         }
         allStrokes.forEach { stroke ->
-            when (stroke.brushType) {
-                MosaicBrushType.PIXEL -> drawPixelMosaic(stroke)
-                MosaicBrushType.BLUR -> drawBlurStroke(stroke)
-                MosaicBrushType.CUSTOM -> drawPatternStroke(stroke)
-            }
+            drawPixelMosaic(stroke)
         }
     }
 }
 
 private fun DrawScope.drawPixelMosaic(stroke: MosaicStroke) {
-    val cell = ((stroke.brushSize * 1.4f).coerceAtLeast(8f))
+    // Mirrors the committed raster's cell exactly (BitmapRenderer.kt applyPixelMosaic):
+    // `brushSize` rounded in box px with the relative short-edge floor, so the live
+    // stand-in cells are the SAME size as the committed pixelation at any resolution.
+    val cell = pixelMosaicCellPx(stroke.brushSize, size.width, size.height)
     drawAlong(stroke.points, spacing = cell / 2f) { p ->
         drawRect(
             color = patternColor(p, stroke),
             topLeft = Offset(p.x - cell / 2f, p.y - cell / 2f),
-            size = Size(cell, cell)
-        )
-    }
-}
-
-private fun DrawScope.drawBlurStroke(stroke: MosaicStroke) {
-    val radius = stroke.brushSize.coerceAtLeast(6f)
-    drawAlong(stroke.points, spacing = radius * 0.6f) { p ->
-        drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(
-                    Color.White.copy(alpha = 0.8f * stroke.opacity),
-                    Color.White.copy(alpha = 0f)
-                ),
-                center = p,
-                radius = radius
-            ),
-            radius = radius,
-            center = p
-        )
-        drawCircle(
-            color = Color.White.copy(alpha = 0.35f * stroke.opacity),
-            radius = radius * 0.45f,
-            center = p
-        )
-    }
-}
-
-private fun DrawScope.drawPatternStroke(stroke: MosaicStroke) {
-    val patternSize = stroke.brushSize.coerceAtLeast(10f)
-    drawAlong(stroke.points, spacing = patternSize * 0.5f) { p ->
-        drawSparkle(
-            center = p,
-            radius = patternSize,
-            color = patternColor(p, stroke),
-            alpha = stroke.opacity
+            size = Size(cell.toFloat(), cell.toFloat())
         )
     }
 }
@@ -147,6 +129,20 @@ private val mosaicPalette = listOf(
     Color(0xFFFFE082), Color(0xFFCE93D8), Color(0xFF80CBC4),
     Color(0xFFBCAAA4), Color(0xFFB0BEC5)
 )
+
+/**
+ * The live pixel-mosaic cell in box px, byte-for-byte the committed raster's
+ * formula (BitmapRenderer.kt applyPixelMosaic): the brush size rounded to px,
+ * floored by the relative short-edge cell so a 3000px-wide photo still gets a
+ * chunkier pixelation than a 500px preview. Both sides consume the SAME
+ * brush size — the overlay's box-px brushSize equals the raster's
+ * `brushSize × surfaceWidth` at preview resolution — so the stand-in cells and
+ * the committed cells are interchangeable at every resolution.
+ */
+internal fun pixelMosaicCellPx(brushSizePx: Float, canvasWidthPx: Float, canvasHeightPx: Float): Int =
+    brushSizePx
+        .roundToInt()
+        .coerceAtLeast((minOf(canvasWidthPx, canvasHeightPx) / 140f).coerceAtLeast(1f).roundToInt())
 
 private fun patternColor(p: Offset, stroke: MosaicStroke): Color {
     val hash = (p.x * 73856093).toInt() xor (p.y * 19349663).toInt()

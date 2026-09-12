@@ -17,7 +17,12 @@ s@^\s*applicationId\s*=\s*"?([^".]*\.)*([^."]+)"?\s*$@\2@
 if [ -z "$name" ]; then
   name=$(basename "$(cd "$dir"; pwd)")
 fi
+branch=$(git -C "$dir" rev-parse --abbrev-ref HEAD || :)
+if [ -n "$branch" -a "$branch" != master ]; then
+  name="$name-$branch"
+fi
 
+run_build=1
 run_test=1
 run_lint=1
 while [ $# -gt 0 ]; do
@@ -27,6 +32,9 @@ while [ $# -gt 0 ]; do
   ;;
   nolint)
     run_lint=0
+  ;;
+  nobuild)
+    run_build=0
   ;;
   *)
     printf '!! Unknown argument "%s" (expected: notest | nolint)\n' "$1" >&2
@@ -95,7 +103,8 @@ EOF
     --change 'ENV ANDROID_HOME=/opt/android-sdk' \
     --change 'ENV HOME=/home/build' \
     --change 'ENV GRADLE_USER_HOME=/home/build/.gradle' \
-    --change 'ENV ANDROID_SDK_HOME=/home/build/.android' \
+    --change 'ENV ANDROID_SDK_HOME=/home/build' \
+    --change 'ENV JAVA_TOOL_OPTIONS=-Duser.home=/home/build' \
     --change 'USER 2000:2000' \
     --change 'WORKDIR /workspace' \
     --change 'ENTRYPOINT []' \
@@ -103,7 +112,7 @@ EOF
     "$did" \
     android-sdk > /dev/null
   docker rm "$did" > /dev/null
-  docker images -qf dangling=true | xargs -r docker rmi
+  docker images -qf dangling=true | xargs -r docker rmi || :
 fi
 
 if [ -z "$(docker ps -qaf "name=${name}-build")" ]; then
@@ -114,7 +123,20 @@ elif [ -z "$(docker ps -qf "name=${name}-build")" ]; then
   docker start "${name}-build"
 fi
 
+if [ -f "$dir/.tmp/android.keystore" ]; then
+  if ! docker exec "${name}-build" test -f /home/build/.android/debug.keystore; then
+    docker exec -i "${name}-build" sh -c 'mkdir -p "$HOME/.android"; cat > "$HOME/.android/debug.keystore"' < "$dir/.tmp/android.keystore"
+  fi
+elif docker exec "${name}-build" test -f /home/build/.android/debug.keystore; then
+  mkdir -p "$dir/.tmp"
+  docker exec "${name}-build" cat /home/build/.android/debug.keystore > "$dir/.tmp/android.keystore"
+fi
+
 printf '==> Syncing working tree\n'
+docker exec -u 0:0 "${name}-build" find . \
+  ! -name gradle.properties \
+  \( ! -user 2000 -o ! -group 2000 \) \
+  -exec chown 2000:2000 {} +
 docker exec "${name}-build" find . \
   -mindepth 1 \( \
   -name build \
@@ -123,7 +145,7 @@ docker exec "${name}-build" find . \
   -o -name gradle.properties \
   \) -prune \
   -o ! -type d -exec rm -f {} + \
-  -o -exec sh -c 'rmdir -p "$@" || :' - {} +
+  -o -exec sh -c 'rmdir -p "$@" || :' - {} + 2> /dev/null
 tar -cf- -C "$dir" \
   --exclude=./.tmp \
   --exclude=./.re \
@@ -131,6 +153,7 @@ tar -cf- -C "$dir" \
   --exclude=./.github \
   --exclude=./.git \
   --exclude=./.gradle \
+  --exclude=./gradle.properties \
   --exclude=./.kotlin \
   --exclude='*/.gradle' \
   --exclude='*/.kotlin' \
@@ -139,15 +162,23 @@ tar -cf- -C "$dir" \
   . |
   docker exec -i "${name}-build" tar -xf-
 
+if [ $run_build -eq 0 -a $run_test -eq 0 -a $run_lint -eq 0 ]; then
+  printf '==> Skipping building...\n'
+  exit
+fi
+
 printf '==> Building app\n'
 set --
+if [ $run_build -ne 0 ]; then
+  set -- assembleDebug
+fi
 if [ $run_test -ne 0 ]; then
-  set -- testDebugUnitTest
+  set -- "$@" testDebugUnitTest
 fi
 if [ $run_lint -ne 0 ]; then
   set -- "$@" lintDebug
 fi
-docker exec -d "${name}-build" sh -c './gradlew assembleDebug "$@" --no-daemon --max-workers=1 > /tmp/build.log 2>&1' - "$@"
+docker exec -d "${name}-build" sh -c './gradlew "$@" --no-daemon --max-workers=1 > /tmp/build.log 2>&1' - "$@"
 attempt=0
 result=
 while [ $attempt -lt 80 ]; do
@@ -158,10 +189,14 @@ while [ $attempt -lt 80 ]; do
     printf '>> Build finished after ~%ss: %s\n' "$((attempt * 15))" "$result"
     break
   fi
+  if ! docker exec "${name}-build" pidof -s java > /dev/null 2>&1; then
+    printf '>> Build interrupted after ~%ss\n' "$((attempt * 15))"
+    break
+  fi
   printf '>> ...still running (%ss)\n' "$((attempt * 15))"
 done
 
-if [ "$result" = 'BUILD SUCCESSFUL' ]; then
+if [ $run_build -ne 0 -a "$result" = 'BUILD SUCCESSFUL' ]; then
   _dir=app/build/outputs/apk/debug
   _file="$_dir/app-debug.apk"
   if [ ! -d "$dir/$_dir" ]; then

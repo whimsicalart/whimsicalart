@@ -7,24 +7,32 @@ import androidx.compose.ui.graphics.Color
 data class MosaicStroke(
     val id: String,
     val points: List<Offset>,
-    val brushType: MosaicBrushType,
     val brushSize: Float = 20f,
     val opacity: Float = 1f
 )
 
-enum class MosaicBrushType {
-    PIXEL,
-    BLUR,
-    CUSTOM
-}
-
 data class MosaicEditorState(
     val strokes: List<MosaicStroke> = emptyList(),
-    val selectedBrushType: MosaicBrushType = MosaicBrushType.PIXEL,
     val brushSize: Float = 20f,
     val opacity: Float = 1f,
     val isErasing: Boolean = false,
     val currentStroke: MosaicStroke? = null,
     val suggestedRegions: List<RectF> = emptyList(),
-    val isSuggesting: Boolean = false
+    val isSuggesting: Boolean = false,
+    /**
+     * True while the on-screen preview shows the REAL pixelation/privacy effect
+     * for the committed strokes (so the editor hides the patterned stand-in and
+     * folds the strokes in). False while the user is mid-stroke or the 500 ms
+     * debounce is still counting down (docs/effects_reference.md → Live-applied
+     * brush effects).
+     */
+    val liveMosaicApplied: Boolean = false,
+    /**
+     * Monotonically increasing version of the committed [strokes] list, bumped
+     * whenever a stroke is settled / erased / cleared. The editor keeps drawing
+     * the committed strokes while the published composite preview still predates
+     * this version (no dead gap), hiding them only once a composite that folds
+     * these strokes has been published.
+     */
+    val strokesVersion: Int = 0
 )

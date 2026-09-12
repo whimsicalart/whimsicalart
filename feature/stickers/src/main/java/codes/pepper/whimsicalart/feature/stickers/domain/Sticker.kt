@@ -2,6 +2,7 @@ package codes.pepper.whimsicalart.feature.stickers.domain
 
 import androidx.annotation.DrawableRes
 import codes.pepper.whimsicalart.feature.stickers.R
+import java.util.UUID
 
 data class Sticker(
     val id: String,
@@ -9,21 +10,30 @@ data class Sticker(
     val category: StickerCategory,
     @DrawableRes val drawableRes: Int,
     val width: Int = 200,
-    val height: Int = 200
+    val height: Int = 200,
+    val customColor: Boolean = false,
+    val defaultTintColor: Int? = null
 )
 
 enum class StickerCategory {
     EMOJI,
+    SHAPES,
     DECORATION,
-    TEXT,
-    FRAME,
     NATURE,
     FOOD,
     ANIMALS,
     OBJECTS
 }
 
+/**
+ * How the sticker's art is outlined (spec: effects_reference.md → *Stickers* →
+ * *Line*). Used only by colour-enabled stickers; [NONE] draws nothing while the
+ * thickness/colour values stay retained for when a style is picked later.
+ */
+enum class StickerLineStyle { NONE, SOLID, DASHED, DOTTED }
+
 data class StickerPlacement(
+    val id: String = UUID.randomUUID().toString(),
     val stickerId: String,
     val x: Float,
     val y: Float,
@@ -31,26 +41,87 @@ data class StickerPlacement(
     val scaleY: Float = 1f,
     val rotation: Float = 0f,
     val opacity: Float = 1f,
-    val isFlipped: Boolean = false
+    val isFlipped: Boolean = false,
+    val tintColor: Int? = null,
+    val emojiText: String? = null,
+    /** The Gallery sticker: the picked image's content URI, in place of a preset id. */
+    val imageUri: String? = null,
+    /**
+     * The picked image's intrinsic width:height ratio (EXIF-oriented) — the
+     * Gallery sticker keeps its own aspect ratio (spec: "Gallery stickers keep
+     * the original image's aspect ratio"), so the on-canvas box is proportional
+     * and the renderer never distorts or centre-crops it. Defaults to 1 (square)
+     * for emoji / presets, whose boxes are already their own geometry.
+     */
+    val aspectRatio: Float = 1f,
+    /** The sticker's outline style (colour-enabled stickers), default none. */
+    val lineStyle: StickerLineStyle = StickerLineStyle.NONE,
+    /**
+     * Outline thickness as a fraction of the sticker's shorter side (spec's
+     * default 5%).
+     */
+    val lineThickness: Float = 0.05f,
+    /**
+     * Outline colour; null resolves to **black** at draw time (the default line
+     * colour), so a freshly-enabled line starts black regardless of the sticker's
+     * default fill colour.
+     */
+    val lineColor: Int? = null
 )
 
 object StickerPresets {
     val stickers = listOf(
+        // --- SHAPES: tintable geometry, each with a default colour ---
         Sticker(
             id = "heart_1",
             name = "Heart",
-            category = StickerCategory.EMOJI,
-            drawableRes = R.drawable.sticker_heart),
+            category = StickerCategory.SHAPES,
+            drawableRes = R.drawable.sticker_heart,
+            customColor = true,
+            defaultTintColor = 0xFFF44336.toInt()),
         Sticker(
             id = "star_1",
             name = "Star",
-            category = StickerCategory.EMOJI,
-            drawableRes = R.drawable.sticker_star),
+            category = StickerCategory.SHAPES,
+            drawableRes = R.drawable.sticker_star,
+            customColor = true,
+            defaultTintColor = 0xFFFFEB3B.toInt()),
+        Sticker(
+            id = "circle_1",
+            name = "Circle",
+            category = StickerCategory.SHAPES,
+            drawableRes = R.drawable.sticker_circle,
+            customColor = true,
+            defaultTintColor = 0xFF03A9F4.toInt()),
+        Sticker(
+            id = "square_1",
+            name = "Square",
+            category = StickerCategory.SHAPES,
+            drawableRes = R.drawable.sticker_square,
+            customColor = true,
+            defaultTintColor = 0xFF3F51B5.toInt()),
+        Sticker(
+            id = "triangle_1",
+            name = "Triangle",
+            category = StickerCategory.SHAPES,
+            drawableRes = R.drawable.sticker_triangle,
+            customColor = true,
+            defaultTintColor = 0xFF4CAF50.toInt()),
         Sticker(
             id = "flower_1",
             name = "Flower",
-            category = StickerCategory.NATURE,
-            drawableRes = R.drawable.sticker_flower),
+            category = StickerCategory.SHAPES,
+            drawableRes = R.drawable.sticker_flower,
+            customColor = true,
+            defaultTintColor = 0xFFEC407A.toInt()),
+        Sticker(
+            id = "drop_1",
+            name = "Drop",
+            category = StickerCategory.SHAPES,
+            drawableRes = R.drawable.sticker_drop,
+            customColor = true,
+            defaultTintColor = 0xFF00BCD4.toInt()),
+        // --- Decoration ---
         Sticker(
             id = "sparkle_1",
             name = "Sparkle",
@@ -69,8 +140,9 @@ object StickerPresets {
         Sticker(
             id = "smiley_1",
             name = "Smiley",
-            category = StickerCategory.EMOJI,
-            drawableRes = R.drawable.sticker_smiley),
+            category = StickerCategory.DECORATION,
+            drawableRes = R.drawable.sticker_smiley,
+            customColor = true),
         Sticker(
             id = "cherry_blossom_1",
             name = "Cherry Blossom",

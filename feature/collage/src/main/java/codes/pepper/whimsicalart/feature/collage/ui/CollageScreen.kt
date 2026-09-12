@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -37,15 +38,12 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -65,12 +63,14 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import coil.compose.AsyncImage
+import codes.pepper.whimsicalart.core.designsystem.LocalUiScale
+import codes.pepper.whimsicalart.core.designsystem.ScaledTopBar
+import codes.pepper.whimsicalart.core.designsystem.ScaledTopBarIconButton
 import codes.pepper.whimsicalart.feature.collage.domain.CollageCell
 import codes.pepper.whimsicalart.feature.collage.domain.CollageTemplates
 import codes.pepper.whimsicalart.feature.collage.ui.viewmodel.CollageViewModel
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CollageScreen(
     initialPhotos: List<Uri>,
@@ -81,6 +81,7 @@ fun CollageScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+    val s = LocalUiScale.current
 
     LaunchedEffect(initialPhotos) {
         if (initialPhotos.isNotEmpty()) {
@@ -117,30 +118,23 @@ fun CollageScreen(
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        TopAppBar(
-            title = { Text("Collage Maker") },
+        ScaledTopBar(
+            title = "Collage Maker",
             navigationIcon = {
-                IconButton(onClick = onBack) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back"
-                    )
-                }
-            },
-            colors = TopAppBarDefaults.topAppBarColors(
-                containerColor = MaterialTheme.colorScheme.primary,
-                titleContentColor = MaterialTheme.colorScheme.onPrimary,
-                navigationIconContentColor = MaterialTheme.colorScheme.onPrimary,
-                actionIconContentColor = MaterialTheme.colorScheme.onPrimary
-            )
+                ScaledTopBarIconButton(
+                    onClick = onBack,
+                    contentDescription = "Back",
+                    icon = Icons.AutoMirrored.Filled.ArrowBack
+                )
+            }
         )
 
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+                .padding(16.dp * s),
+            verticalArrangement = Arrangement.spacedBy(16.dp * s)
         ) {
             CollagePreview(
                 slotUris = uiState.slots,
@@ -165,16 +159,35 @@ fun CollageScreen(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Placement", modifier = Modifier.padding(end = 12.dp))
+                Text(
+                    "Placement",
+                    modifier = Modifier.padding(end = 12.dp * s),
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontSize = MaterialTheme.typography.bodyMedium.fontSize * s
+                    )
+                )
                 FilterChip(
                     selected = uiState.isFreeForm,
                     onClick = { viewModel.toggleFreeForm() },
-                    label = { Text("Free form") }
+                    label = {
+                        Text(
+                            "Free form",
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontSize = MaterialTheme.typography.labelMedium.fontSize * s
+                            )
+                        )
+                    },
+                    modifier = Modifier.heightIn((32.dp * s).coerceAtLeast(28.dp))
                 )
             }
 
-            Text("Layout", style = MaterialTheme.typography.titleSmall)
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "Layout",
+                style = MaterialTheme.typography.titleSmall.copy(
+                    fontSize = MaterialTheme.typography.titleSmall.fontSize * s
+                )
+            )
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp * s)) {
                 itemsIndexed(CollageTemplates.all) { index, template ->
                     TemplateChip(
                         selected = uiState.template.id == template.id,
@@ -197,14 +210,25 @@ fun CollageScreen(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Spacing", modifier = Modifier.padding(end = 8.dp))
+                Text(
+                    "Spacing",
+                    modifier = Modifier.padding(end = 8.dp * s),
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontSize = MaterialTheme.typography.bodyMedium.fontSize * s
+                    )
+                )
                 Slider(
                     value = uiState.borderWidth,
                     onValueChange = { viewModel.updateBorderWidth(it) },
                     valueRange = 0f..40f,
                     modifier = Modifier.weight(1f)
                 )
-                Text("${uiState.borderWidth.toInt()}px")
+                Text(
+                    "${uiState.borderWidth.toInt()}px",
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontSize = MaterialTheme.typography.bodyMedium.fontSize * s
+                    )
+                )
             }
 
             ColorRow(
@@ -239,7 +263,12 @@ fun CollageScreen(
                         strokeWidth = 2.dp
                     )
                 }
-                Text(if (uiState.isSaving) "Saving..." else "Save Collage")
+                Text(
+                    if (uiState.isSaving) "Saving..." else "Save Collage",
+                    style = MaterialTheme.typography.labelLarge.copy(
+                        fontSize = MaterialTheme.typography.labelLarge.fontSize * s
+                    )
+                )
             }
         }
     }
@@ -347,15 +376,27 @@ private fun TemplateChip(
     photoCount: Int,
     onClick: () -> Unit
 ) {
+    val s = LocalUiScale.current
     FilterChip(
         selected = selected,
         onClick = onClick,
         label = {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(name)
-                Text("$photoCount", style = MaterialTheme.typography.labelSmall)
+                Text(
+                    name,
+                    style = MaterialTheme.typography.labelMedium.copy(
+                        fontSize = MaterialTheme.typography.labelMedium.fontSize * s
+                    )
+                )
+                Text(
+                    "$photoCount",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontSize = MaterialTheme.typography.labelSmall.fontSize * s
+                    )
+                )
             }
         },
+        modifier = Modifier.heightIn((40.dp * s).coerceAtLeast(36.dp)),
         colors = FilterChipDefaults.filterChipColors(
             selectedContainerColor = MaterialTheme.colorScheme.primary,
             selectedLabelColor = MaterialTheme.colorScheme.onPrimary
@@ -370,21 +411,28 @@ private fun ColorRow(
     selected: Color,
     onSelect: (Color) -> Unit
 ) {
+    val s = LocalUiScale.current
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(label, modifier = Modifier.padding(end = 12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            label,
+            modifier = Modifier.padding(end = 12.dp * s),
+            style = MaterialTheme.typography.bodyMedium.copy(
+                fontSize = MaterialTheme.typography.bodyMedium.fontSize * s
+            )
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp * s)) {
             colors.forEach { color ->
                 val isSelected = selected == color
                 Box(
                     modifier = Modifier
-                        .size(28.dp)
+                        .size((28.dp * s).coerceAtLeast(24.dp))
                         .clip(CircleShape)
                         .background(color)
                         .border(
-                            width = if (isSelected) 3.dp else 1.dp,
+                            width = if (isSelected) (3.dp * s).coerceAtLeast(2.dp) else (1.dp * s).coerceAtLeast(1.dp),
                             color = if (isSelected) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.outline,
                             shape = CircleShape

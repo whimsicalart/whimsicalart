@@ -32,6 +32,13 @@ class StickerPresetsTest {
     fun `presets include the newly added entries`() {
         val ids = StickerPresets.stickers.map { it.id }
         listOf(
+            "heart_1",
+            "star_1",
+            "circle_1",
+            "square_1",
+            "triangle_1",
+            "flower_1",
+            "drop_1",
             "smiley_1",
             "cherry_blossom_1",
             "sunflower_1",
@@ -58,7 +65,7 @@ class StickerPresetsTest {
     fun `presets exist in several categories`() {
         val categories = StickerPresets.stickers.map { it.category }.distinct()
         listOf(
-            StickerCategory.EMOJI,
+            StickerCategory.SHAPES,
             StickerCategory.NATURE,
             StickerCategory.FOOD,
             StickerCategory.ANIMALS,
@@ -66,6 +73,18 @@ class StickerPresetsTest {
             StickerCategory.DECORATION
         ).forEach { category ->
             assertTrue("No sticker in category $category", categories.contains(category))
+        }
+    }
+
+    @Test
+    fun `the shapes section holds tintable geometry with a default colour each`() {
+        val shapes = StickerPresets.getStickersByCategory(StickerCategory.SHAPES)
+        val byId = shapes.associateBy { it.id }
+        listOf("heart_1", "star_1", "circle_1", "square_1", "triangle_1", "flower_1", "drop_1").forEach { id ->
+            val sticker = byId[id]
+            assertNotNull("Missing shape $id", sticker)
+            assertTrue("$id should be tintable", sticker!!.customColor)
+            assertNotNull("$id should carry a default colour", sticker.defaultTintColor)
         }
     }
 

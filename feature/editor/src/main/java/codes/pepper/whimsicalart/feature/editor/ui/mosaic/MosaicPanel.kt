@@ -16,12 +16,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import codes.pepper.whimsicalart.core.designsystem.LocalUiScale
 
 @Composable
 fun MosaicPanel(
     state: MosaicEditorState,
     imageUri: android.net.Uri?,
-    onBrushTypeChange: (MosaicBrushType) -> Unit,
     onBrushSizeChange: (Float) -> Unit,
     onOpacityChange: (Float) -> Unit,
     onToggleErasing: () -> Unit,
@@ -31,42 +31,51 @@ fun MosaicPanel(
     modifier: Modifier = Modifier
 ) {
     val showClearConfirm = remember { mutableStateOf(false) }
+    val s = LocalUiScale.current
 
-    Column(modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+    Column(modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp * s, vertical = 8.dp * s)) {
         Row(modifier = Modifier.fillMaxWidth()) {
-            MosaicBrushType.entries.forEach { type ->
-                FilterChip(
-                    selected = state.selectedBrushType == type,
-                    onClick = { onBrushTypeChange(type) },
-                    label = { Text(type.name.lowercase().replaceFirstChar { it.uppercase() }) },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = MaterialTheme.colorScheme.primary,
-                        selectedLabelColor = MaterialTheme.colorScheme.onPrimary
-                    )
+            Text(
+                text = "Size",
+                modifier = Modifier.padding(end = 8.dp * s),
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize = MaterialTheme.typography.bodyMedium.fontSize * s
                 )
-            }
-        }
-
-        Row(modifier = Modifier.fillMaxWidth()) {
-            Text("Size", modifier = Modifier.padding(end = 8.dp))
+            )
             Slider(
                 value = state.brushSize,
                 onValueChange = onBrushSizeChange,
                 valueRange = 6f..60f,
-                modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
+                modifier = Modifier.weight(1f).padding(horizontal = 8.dp * s)
             )
-            Text("${state.brushSize.toInt()}")
+            Text(
+                text = "${state.brushSize.toInt()}",
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize = MaterialTheme.typography.bodyMedium.fontSize * s
+                )
+            )
         }
 
         Row(modifier = Modifier.fillMaxWidth()) {
-            Text("Opacity", modifier = Modifier.padding(end = 8.dp))
+            Text(
+                text = "Opacity",
+                modifier = Modifier.padding(end = 8.dp * s),
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize = MaterialTheme.typography.bodyMedium.fontSize * s
+                )
+            )
             Slider(
                 value = state.opacity,
                 onValueChange = onOpacityChange,
                 valueRange = 0.1f..1f,
-                modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
+                modifier = Modifier.weight(1f).padding(horizontal = 8.dp * s)
             )
-            Text("${(state.opacity * 100).toInt()}%")
+            Text(
+                text = "${(state.opacity * 100).toInt()}%",
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize = MaterialTheme.typography.bodyMedium.fontSize * s
+                )
+            )
         }
 
         Row(modifier = Modifier.fillMaxWidth()) {
@@ -84,34 +93,48 @@ fun MosaicPanel(
         }
 
         Row(modifier = Modifier.fillMaxWidth()) {
+            val labelStyle = MaterialTheme.typography.labelMedium.copy(
+                fontSize = MaterialTheme.typography.labelMedium.fontSize * s
+            )
             FilterChip(
                 selected = state.isErasing,
                 onClick = onToggleErasing,
-                label = { Text("Eraser") },
+                label = { Text("Eraser", style = labelStyle) },
                 colors = FilterChipDefaults.filterChipColors(
                     selectedContainerColor = MaterialTheme.colorScheme.tertiary,
                     selectedLabelColor = MaterialTheme.colorScheme.onTertiary
                 )
             )
             TextButton(onClick = { showClearConfirm.value = true }) {
-                Text("Clear All")
+                Text(
+                    "Clear All",
+                    style = MaterialTheme.typography.labelLarge.copy(
+                        fontSize = MaterialTheme.typography.labelLarge.fontSize * s
+                    )
+                )
             }
         }
     }
 
     if (showClearConfirm.value) {
+        val dialogStyle = MaterialTheme.typography.bodyLarge.copy(
+            fontSize = MaterialTheme.typography.bodyLarge.fontSize * s
+        )
+        val dialogTitleStyle = MaterialTheme.typography.titleLarge.copy(
+            fontSize = MaterialTheme.typography.titleLarge.fontSize * s
+        )
         AlertDialog(
             onDismissRequest = { showClearConfirm.value = false },
-            title = { Text("Clear mosaic strokes?") },
+            title = { Text("Clear mosaic strokes?", style = dialogTitleStyle) },
             confirmButton = {
                 TextButton(onClick = {
                     onClear()
                     showClearConfirm.value = false
-                }) { Text("Clear") }
+                }) { Text("Clear", style = dialogStyle) }
             },
             dismissButton = {
                 TextButton(onClick = { showClearConfirm.value = false }) {
-                    Text("Cancel")
+                    Text("Cancel", style = dialogStyle)
                 }
             }
         )

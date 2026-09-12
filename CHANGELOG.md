@@ -14,9 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Crop tool with aspect ratios (Free, 1:1, 4:3, 16:9, 3:2, 9:16), rotate (90° steps), and flip (horizontal/vertical)
 - Adjustment tools: brightness, contrast, saturation, exposure, shadows, highlights, temperature, tint, vignette, sharpening
 - Save & share with quality slider, JPEG/PNG export, resolution selection (Original/High/Medium/Low), and MediaStore integration
-- GPU-accelerated filter system (OpenGL ES 3.0) with framebuffer objects, 10+ preset filters, intensity control, and real-time preview
-- 3D LUT color grading with 64×64×64 lookup tables and trilinear interpolation
-- Beauty tools with ML Kit face detection, edge-aware auto beauty pipeline, manual brushes, face reshaping (mesh deformation), and makeup tools
+- Filter library with preset color grades, style tone-maps, and lens filters (CPU, matrix/analytic based), with single- and multi-select and intensity control
+- Beauty tools with on-device MediaPipe face detection, edge-aware auto beauty pipeline, manual brushes, face reshaping (mesh deformation), and makeup tools
 - Stickers with categories, drag/pinch-to-scale/rotate, opacity, and flip
 - Text overlays with font selection, color picker, styles, shadows, stroke, alignment, and background shapes
 - Mosaic tool with pixel, blur, and custom-pattern brushes plus eraser and opacity control
@@ -41,4 +40,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 
 - Store listing description, community guidelines, contribution guidelines, and security policy added in earlier milestones
+- F-Droid release requirements documented (build without signing config, version from git tags, no non-free dependencies)
 - TODO.md tracks the 8-phase development roadmap

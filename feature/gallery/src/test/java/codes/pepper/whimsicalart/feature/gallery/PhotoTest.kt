@@ -106,4 +106,45 @@ class PhotoTest {
         assertEquals(0, photo.width)
         assertEquals(0, photo.height)
     }
+
+    @Test
+    fun `photo extended sort fields default to empty values`() {
+        val photo = Photo(
+            id = 1L,
+            uri = Uri.parse("content://media/1"),
+            displayName = "test.jpg",
+            dateAdded = 100L,
+            width = 10,
+            height = 10
+        )
+
+        assertEquals(0L, photo.dateModified)
+        assertEquals(0L, photo.size)
+        assertEquals("", photo.path)
+        assertEquals("", photo.mimeType)
+        assertEquals(0L, photo.dateTaken)
+    }
+
+    @Test
+    fun `photo extended sort fields store values correctly`() {
+        val photo = Photo(
+            id = 1L,
+            uri = Uri.parse("content://media/1"),
+            displayName = "test.jpg",
+            dateAdded = 100L,
+            width = 10,
+            height = 10,
+            dateModified = 200L,
+            size = 300L,
+            path = "Pictures/",
+            mimeType = "image/jpeg",
+            dateTaken = 400L
+        )
+
+        assertEquals(200L, photo.dateModified)
+        assertEquals(300L, photo.size)
+        assertEquals("Pictures/", photo.path)
+        assertEquals("image/jpeg", photo.mimeType)
+        assertEquals(400L, photo.dateTaken)
+    }
 }

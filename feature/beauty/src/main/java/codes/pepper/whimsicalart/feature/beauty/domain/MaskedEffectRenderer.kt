@@ -8,6 +8,7 @@ import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Xfermode
 import android.os.Build
+import java.util.LinkedHashMap
 import kotlin.math.ceil
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -40,9 +41,27 @@ object MaskedEffectRenderer {
     }
 
     /**
+     * Dimension-agnostic feathered-edge reach: 18% of the mask's short edge,
+     * capped at a fraction of the mask (a huge full-size mask cannot
+     * over-feather). `internal` for tests.
+     */
+    internal fun featheredEdge(size: Float): Int =
+        (size * 0.18f).roundToInt()
+            .coerceIn(2, (size * 0.4f).roundToInt().coerceAtLeast(2))
+
+    /**
      * Feathered-mask variant that keeps the caller's [Paint] (colour, alpha and
      * blend mode) so soft-light-style tools (skin smoothing, foundation) get the
      * same blurred-boundary treatment as the colour/Xfermode tools.
+     *
+     * The mask construction (off-screen bitmap + drawPath + box blur) depends
+     * ONLY on the region [Path]'s geometry and the effect's RGB colour — never
+     * on the intensity, which merely modulates the composite opacity. A slider
+     * drag re-runs the effect with the same face geometry and colour on every
+     * fold, so the finished mask is cached keyed by a content signature of the
+     * path (see [maskKey]) and each tick just recomposites the stored bitmap —
+     * skipping the allocation + blur entirely, with the paint's alpha (the
+     * intensity) applied at draw time instead of being baked into the blur.
      */
     fun drawFeatheredMask(canvas: Canvas, path: Path, paint: Paint) {
         val bounds = RectF()
@@ -50,28 +69,131 @@ object MaskedEffectRenderer {
         if (bounds.width() <= 0f || bounds.height() <= 0f) return
 
         val size = min(bounds.width(), bounds.height())
-        val feather = (size * 0.18f).roundToInt().coerceIn(2, 24)
+        // One effect, two scales: the feathered edge is 18% of the mask bounds
+        // (the old fixed 24px cap made previews feather ~12% of a face while the
+        // full-size fold feathered ~1.5% of the same face); the ceiling is a
+        // fraction of the mask so a huge full-size mask cannot over-feather.
+        val feather = featheredEdge(size)
         val pad = ceil(feather * 2f + (feather * 0.12f)).toInt().coerceAtLeast(4)
         val width = (bounds.width() + pad * 2).toInt().coerceAtLeast(2)
         val height = (bounds.height() + pad * 2).toInt().coerceAtLeast(2)
 
+        val key = maskKey(path, feather, pad, width, height, paint)
+        if (key != NO_CACHE) {
+            maskCache.remove(key)?.let { hit ->
+                maskCache[key] = hit
+                canvas.drawBitmap(hit.bitmap, hit.left, hit.top, compositePaint(paint))
+                return
+            }
+        }
+
+        maskRenderCount++
+        // Fill at FULL alpha so the cached artefact is intensity-independent: the
+        // caller's alpha is reapplied on the composite paint (see
+        // [compositePaint]). Premultiplied blur + alpha-scaled composite is
+        // mathematically identical to baking the alpha into the fill.
         val mask = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val maskCanvas = Canvas(mask)
-        val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = paint.color }
+        val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(255, Color.red(paint.color), Color.green(paint.color), Color.blue(paint.color))
+        }
         maskCanvas.translate(-bounds.left + pad, -bounds.top + pad)
         maskCanvas.drawPath(path, fill)
 
         val blurred = boxBlurPremultiplied(mask, feather)
         mask.recycle()
 
-        val composite = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            xfermode = paint.xfermode
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                blendMode = paint.blendMode
-            }
+        if (key != NO_CACHE) {
+            putCache(key, CachedMask(blurred, bounds.left - pad, bounds.top - pad, blurred.byteCount))
         }
-        canvas.drawBitmap(blurred, bounds.left - pad, bounds.top - pad, composite)
-        blurred.recycle()
+        canvas.drawBitmap(blurred, bounds.left - pad, bounds.top - pad, compositePaint(paint))
+        if (key == NO_CACHE) blurred.recycle()
+    }
+
+    private fun compositePaint(source: Paint): Paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        xfermode = source.xfermode
+        alpha = Color.alpha(source.color)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            blendMode = source.blendMode
+        }
+    }
+
+    /*
+     * Bounded LRU of finished (blurred) feathered masks, keyed by a 63-bit
+     * content signature. A geometry-stable effect over any number of intensity
+     * ticks hits the same entry and only recomposites.
+     */
+    private class CachedMask(val bitmap: Bitmap, val left: Float, val top: Float, val bytes: Int)
+
+    private const val NO_CACHE = 0L
+
+    private const val MAX_CACHE_BYTES = 4 * 1024 * 1024
+
+    private val maskCache = LinkedHashMap<Long, CachedMask>(16, 0.75f, true)
+
+    private var maskCacheBytes = 0L
+
+    /** Feathered-mask renders since the last [clearMaskCache]; internal for tests. */
+    internal var maskRenderCount: Int = 0
+        private set
+
+    private fun putCache(key: Long, entry: CachedMask) {
+        maskCache[key] = entry
+        maskCacheBytes += entry.bytes
+        while (maskCacheBytes > MAX_CACHE_BYTES && maskCache.isNotEmpty()) {
+            val eldest = maskCache.entries.iterator().next()
+            maskCacheBytes -= eldest.value.bytes
+            eldest.value.bitmap.recycle()
+            maskCache.remove(eldest.key)
+        }
+    }
+
+    /** Drops every cached mask (frees the bitmaps); internal for tests. */
+    internal fun clearMaskCache() {
+        for (entry in maskCache.values) entry.bitmap.recycle()
+        maskCache.clear()
+        maskCacheBytes = 0L
+        maskRenderCount = 0
+    }
+
+    /**
+     * Content signature of a feathered-mask render: the region's sampled path
+     * geometry plus every other input that affects the finished artefact (the
+     * feather/pad/size derivations are already functions of the bounds, then the
+     * effect RGB colour and blend). The ALPHA is deliberately excluded — the
+     * mask is rendered at full alpha and opacity is applied per-draw, so a
+     * geometry-stable effect reuses the mask across all intensities.
+     *
+     * Sampling the path — rather than keying on Path identity — is what lets two
+     * independently-built but geometrically identical paths (the norm across
+     * drag ticks) share one cached mask. Falls back to [NO_CACHE] when path
+     * sampling is unavailable so the renderer stays correct everywhere and
+     * simply never reuses.
+     */
+    private fun maskKey(path: Path, feather: Int, pad: Int, width: Int, height: Int, paint: Paint): Long {
+        val samples = runCatching { path.approximate(1f) }.getOrNull()
+        if (samples == null || samples.isEmpty()) return NO_CACHE
+        // FNV-1a 64 offset basis expressed as a signed Long
+        // (14695981039346656037 wraps to -3750763034362895579).
+        var hash = -3750763034362895579L
+        for (value in samples) {
+            hash = (hash xor value.toRawBits().toLong()) * 1099511628211L
+        }
+        hash = (hash xor feather.toLong()) * 1099511628211L
+        hash = (hash xor pad.toLong()) * 1099511628211L
+        hash = (hash xor width.toLong()) * 1099511628211L
+        hash = (hash xor height.toLong()) * 1099511628211L
+        hash = (hash xor (paint.color and 0x00FFFFFF).toLong()) * 1099511628211L
+        hash = (hash xor (paint.xfermode?.hashCode()?.toLong() ?: 0L)) * 1099511628211L
+        // Paint.getBlendMode() only exists from API 29; keep the key stable on
+        // older runtimes (the composite path guards the same access).
+        val blend = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            paint.blendMode?.hashCode()?.toLong() ?: 0L
+        } else {
+            0L
+        }
+        hash = (hash xor blend) * 1099511628211L
+        return if (hash == NO_CACHE) 1L else hash
     }
 
     /**

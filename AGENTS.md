@@ -10,7 +10,7 @@ WhimsicalArt is an open-source Android photo editing application built with mode
 - **UI Framework**: Jetpack Compose with Material Design 3
 - **Architecture**: MVVM with Clean Architecture
 - **Dependency Injection**: Hilt
-- **Image Processing**: Custom engine with GPU acceleration
+- **Image Processing**: CPU effect-stack engine (BitmapRenderer / CascadeRenderer) — no GPU/GLSL pipeline
 - **Build System**: Gradle with Kotlin DSL
 - **Min SDK**: 26 (Android 8.0)
 - **Target SDK**: 34 (Android 14)
@@ -19,19 +19,22 @@ WhimsicalArt is an open-source Android photo editing application built with mode
 
 ```
 whimsicalart/
-├── app/                    # Main application module
+├── app/                    # Main application module (navigation, theme, onboarding)
 ├── core/                   # Core business logic
-│   ├── domain/            # Domain models and use cases
-│   ├── data/              # Data layer implementations
-│   └── common/            # Shared utilities
+│   ├── domain/            # Shared domain models (Rotation)
+│   ├── data/              # Reserved for shared data layer (empty placeholder)
+│   ├── common/            # Shared utilities (BitmapPool, PreferencesManager)
+│   └── designsystem/      # Design system components (ColourMath, ColourPicker)
 ├── feature/               # Feature modules
-│   ├── editor/            # Photo editor feature
-│   ├── filters/           # Filter library
-│   ├── beauty/            # Beauty tools
+│   ├── editor/            # Core photo editor (reversible effect stack) + text/mosaic/blur/pen tools
+│   ├── filters/           # Filter presets and CPU style/lens filter processing
+│   ├── beauty/            # Beauty tools (MediaPipe FaceMesh + hair/skin segmentation)
+│   ├── gallery/           # Photo gallery and selection
 │   ├── collage/           # Collage maker
-│   └── stickers/          # Sticker pack support
-├── designsystem/          # Design system components
-└── build-logic/           # Gradle build configuration
+│   ├── stickers/          # Sticker picker and placement
+│   ├── camera/            # Camera capture
+│   └── settings/          # App settings
+└── build-logic/           # Convention plugin scaffolding (not wired — modules apply version-catalog aliases directly)
 ```
 
 ## Code Style
@@ -40,7 +43,7 @@ whimsicalart/
 
 - Follow Kotlin coding conventions
 - Use coroutines for asynchronous operations
-- Prefer sealed classes for state management
+- UI state is an immutable `data class` mutated with `.copy(...)` behind a private `MutableStateFlow`; use sealed classes/interfaces only for genuinely distinct multi-state variants
 - Use extension functions for utility methods
 - Avoid `!!` operator - use safe calls or early returns
 
@@ -80,19 +83,21 @@ whimsicalart/
 - Unit tests for domain logic
 - Integration tests for data layer
 - UI tests for critical user flows
-- Use descriptive test names starting with "should"
+- Use descriptive test names — backtick-quoted sentence descriptions are the prevailing style (some UI/layout tests use `should`-prefixed camelCase)
 
 ## Common Patterns
 
 ### State Management
 
 ```kotlin
-// Use sealed interface for UI state
-sealed interface EditorState {
-    data object Loading : EditorState
-    data class Success(val image: Image) : EditorState
-    data class Error(val message: String) : EditorState
-}
+// UI state is an immutable data class with flags, mutated behind a
+// private MutableStateFlow (use sealed interfaces only for genuinely
+// distinct multi-state variants)
+data class EditorUiState(
+    val brightness: Float = 0f,
+    val isSaving: Boolean = false,
+    val selectedTool: EditTool? = null
+)
 ```
 
 ### Repository Pattern
@@ -151,8 +156,9 @@ Each feature module should contain:
 
 ## Build & Test
 
-- **Fast build** (skip lint + tests): `scripts/build.sh nolint notest`
 - **Full build** (assemble + tests + lint — run before every commit): `scripts/build.sh`
+- **Fast build** (skip lint + tests): `scripts/build.sh nolint notest`
+- **Sync only** (no build/test/lint — just sync the working tree into the container, leaving it free for manual commands): `scripts/build.sh nobuild nolint notest`
 - **Reading build logs**: use `docker exec whimsicalart-build cat /tmp/build.log` (do NOT re-run the build over and over just to inspect output).
 
 ## Manual / Device Testing

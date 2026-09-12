@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Bundled Dancing Script (SIL OFL 1.1) — see res/font/fonts-README.md. -->
+<font-family xmlns:android="http://schemas.android.com/apk/res/android">
+    <font
+        android:fontStyle="normal"
+        android:fontWeight="400"
+        android:font="@font/handwriting_regular" />
+    <font
+        android:fontStyle="normal"
+        android:fontWeight="700"
+        android:font="@font/handwriting_bold" />
+</font-family>

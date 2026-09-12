@@ -14,6 +14,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import codes.pepper.whimsicalart.core.designsystem.LocalUiScale
+
+/**
+ * The readout text for [AdjustmentSlider]: a plain value prints its integer; a
+ * percent range (e.g. the 0..1 skin denoise backend) reads as a live
+ * `0..100%` figure. Pure so the rendering of both readouts is unit-testable.
+ */
+internal fun sliderReadout(value: Float, isPercent: Boolean): String =
+    if (isPercent) "${(value * 100).toInt()}%" else value.toInt().toString()
 
 @Composable
 fun AdjustmentSlider(
@@ -21,12 +30,14 @@ fun AdjustmentSlider(
     value: Float,
     onValueChange: (Float) -> Unit,
     modifier: Modifier = Modifier,
-    valueRange: ClosedFloatingPointRange<Float> = -100f..100f
+    valueRange: ClosedFloatingPointRange<Float> = -100f..100f,
+    isPercent: Boolean = false
 ) {
+    val s = LocalUiScale.current
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .padding(horizontal = 16.dp * s, vertical = 8.dp * s)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -34,20 +45,24 @@ fun AdjustmentSlider(
         ) {
             Text(
                 text = label,
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize = MaterialTheme.typography.bodyMedium.fontSize * s
+                ),
                 modifier = Modifier.weight(1f)
             )
             
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(8.dp * s))
             
             Text(
-                text = value.toInt().toString(),
-                style = MaterialTheme.typography.bodySmall,
+                text = sliderReadout(value, isPercent),
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontSize = MaterialTheme.typography.bodySmall.fontSize * s
+                ),
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
         
-        Spacer(modifier = Modifier.height(4.dp))
+        Spacer(modifier = Modifier.height((4.dp * s).coerceAtLeast(2.dp)))
         
         Slider(
             value = value,
@@ -55,7 +70,7 @@ fun AdjustmentSlider(
             valueRange = valueRange,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp)
+                .padding(horizontal = 12.dp * s)
         )
     }
 }

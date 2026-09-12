@@ -9,21 +9,41 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import codes.pepper.whimsicalart.feature.beauty.domain.BrushStroke
 import kotlin.math.min
 
+/**
+ * The beauty pen's live drag/brush overlay (EditTool.BEAUTY + BRIGHTNESS_PEN).
+ *
+ * Like every source-space brush tool the overlay is drawn in the RAW source
+ * coordinate space and is wrapped in the shared viewport pan/zoom transform
+ * (`.panZoomLayer` in the editor), so committed strokes stay glued to the base
+ * image while the user pans and zooms. Points are captured against [bitmapSize]
+ * (the SOURCE dims, never a downscaled preview) fitted+centred into the box —
+ * exactly the letterbox the editor's ContentScale.Fit image uses — and stored as
+ * NORMALIZED fractions. The committed bake ([BeautyPenEffect] →
+ * `applyBrightnessPen`) maps those same fractions against whatever resolution it
+ * renders at, keeping the stroke resolution-independent and zoom/lock consistent.
+ *
+ * The preview mirrors the bake: hard colour-tinted ADD circles ([BlendMode.Plus]
+ * ≈ the processor's PorterDuff ADD) so what the user paints looks like the
+ * committed stroke.
+ */
 @Composable
 fun BeautyBrushOverlay(
     bitmapSize: Size?,
+    strokes: List<BrushStroke>,
     activeStroke: BrushStroke?,
-    onStart: (PointF) -> Unit,
-    onMove: (PointF) -> Unit,
-    onEnd: () -> Unit,
+    color: Int,
+    onDragStart: (PointF) -> Unit,
+    onDragMove: (PointF) -> Unit,
+    onDragEnd: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    if (bitmapSize == null) return
+    if (bitmapSize == null || bitmapSize.width <= 0f || bitmapSize.height <= 0f) return
 
     BoxWithConstraints(
         modifier = modifier.fillMaxSize()
@@ -38,12 +58,10 @@ fun BeautyBrushOverlay(
         val offsetX = (maxWidth - drawWidth) / 2f
         val offsetY = (maxHeight - drawHeight) / 2f
 
-        fun toBitmap(offset: Offset): PointF {
-            return PointF(
-                (offset.x - offsetX) / scale,
-                (offset.y - offsetY) / scale
-            )
-        }
+        fun toBitmap(offset: Offset): PointF = PointF(
+            (offset.x - offsetX) / drawWidth,
+            (offset.y - offsetY) / drawHeight
+        )
 
         Canvas(
             modifier = Modifier
@@ -51,27 +69,32 @@ fun BeautyBrushOverlay(
                 .pointerInput(Unit) {
                     detectDragGestures(
                         onDragStart = { position ->
-                            onStart(toBitmap(position))
+                            onDragStart(toBitmap(position))
                         },
                         onDrag = { change, _ ->
-                            onMove(toBitmap(change.position))
+                            change.consume()
+                            onDragMove(toBitmap(change.position))
                         },
-                        onDragEnd = { onEnd() },
-                        onDragCancel = { onEnd() }
+                        onDragEnd = { onDragEnd() },
+                        onDragCancel = { onDragEnd() }
                     )
                 }
         ) {
-            val stroke = activeStroke ?: return@Canvas
-            val radius = stroke.size * scale / 2f
-            stroke.points.forEach { point ->
-                drawCircle(
-                    color = Color.White.copy(alpha = (stroke.opacity * 0.9f).coerceIn(0f, 1f)),
-                    radius = radius,
-                    center = Offset(
-                        offsetX + point.x * scale,
-                        offsetY + point.y * scale
+            val all = activeStroke?.let { strokes + it } ?: strokes
+            all.forEach { stroke ->
+                val opacity = stroke.opacity.coerceIn(0f, 1f)
+                val radius = (stroke.size * drawWidth / 2f).coerceAtLeast(1f)
+                stroke.points.forEach { point ->
+                    drawCircle(
+                        color = Color(color).copy(alpha = opacity),
+                        radius = radius,
+                        center = Offset(
+                            offsetX + point.x * drawWidth,
+                            offsetY + point.y * drawHeight
+                        ),
+                        blendMode = BlendMode.Plus
                     )
-                )
+                }
             }
         }
     }

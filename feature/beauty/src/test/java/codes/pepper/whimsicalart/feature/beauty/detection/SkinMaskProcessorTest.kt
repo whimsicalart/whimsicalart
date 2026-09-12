@@ -2,7 +2,9 @@ package codes.pepper.whimsicalart.feature.beauty.detection
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Path
 import android.graphics.RectF
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -77,5 +79,71 @@ class SkinMaskProcessorTest {
         val bounds = RectF()
         path?.computeBounds(bounds, true)
         assertTrue("crosses the broken band", bounds.width() >= 14f && bounds.height() >= 14f)
+    }
+
+    /** The pre-batching reference: per-pixel getPixel sweep, identical math. */
+    private fun toPathScalar(mask: Bitmap, threshold: Int, minRows: Int = 4, stride: Int = 1): Path? {
+        val width = mask.width
+        val height = mask.height
+        val leftEdge = ArrayList<android.graphics.PointF>(height / stride)
+        val rightEdge = ArrayList<android.graphics.PointF>(height / stride)
+        for (y in 0 until height step stride) {
+            var left = -1
+            var right = -1
+            for (x in 0 until width) {
+                if (Color.alpha(mask.getPixel(x, y)) >= threshold) {
+                    if (left < 0) left = x
+                    right = x
+                }
+            }
+            if (left >= 0 && right >= left) {
+                leftEdge.add(android.graphics.PointF(left.toFloat(), y.toFloat()))
+                rightEdge.add(android.graphics.PointF(right.toFloat(), y.toFloat()))
+            }
+        }
+        if (leftEdge.size < minRows) return null
+        val path = Path()
+        path.moveTo(leftEdge[0].x, leftEdge[0].y)
+        for (i in 1 until leftEdge.size) path.lineTo(leftEdge[i].x, leftEdge[i].y)
+        for (i in rightEdge.indices.reversed()) path.lineTo(rightEdge[i].x, rightEdge[i].y)
+        path.close()
+        return path
+    }
+
+    private fun boundsOf(path: Path?): RectF =
+        RectF().also { path?.computeBounds(it, true) }
+
+    @Test
+    fun `batched toPath matches the scalar reference on threshold-edge and transparent-heavy masks`() {
+        // (a) Threshold-edge: alphas straddle the 128 line so every boundary
+        // decision is exercised; (b) transparent-heavy: sparse opaque pixels on
+        // a fully transparent field; (c) a mid-field blob that clips every axis.
+        val thresholdEdge = emptyMask(40, 40).also { m ->
+            for (y in 5 until 35 step 2) {
+                for (x in 8 until 32) {
+                    m.setPixel(x, y, Color.argb(if (x < 20) 128 else 127, 255, 255, 255))
+                }
+            }
+            m.setPixel(31, 39, Color.argb(200, 255, 255, 255))
+        }
+        val transparentHeavy = emptyMask(40, 40).also { m ->
+            m.setPixel(5, 5, Color.argb(255, 255, 255, 255))
+            m.setPixel(5, 6, Color.argb(129, 255, 255, 255))
+            m.setPixel(35, 34, Color.argb(128, 255, 255, 255))
+            m.setPixel(35, 35, Color.argb(127, 255, 255, 255))
+        }
+        val clippedBlob = emptyMask(24, 24).also { m ->
+            for (y in 0 until 6) for (x in 18 until 24) {
+                m.setPixel(x, y, Color.argb(255, 255, 255, 255))
+            }
+        }
+        for (mask in listOf(thresholdEdge, transparentHeavy, clippedBlob)) {
+            val batched = boundsOf(SkinMaskProcessor.toPath(mask, threshold = 128))
+            val scalar = boundsOf(toPathScalar(mask, threshold = 128))
+            assertEquals("left", scalar.left, batched.left, 0.01f)
+            assertEquals("right", scalar.right, batched.right, 0.01f)
+            assertEquals("top", scalar.top, batched.top, 0.01f)
+            assertEquals("bottom", scalar.bottom, batched.bottom, 0.01f)
+        }
     }
 }

@@ -110,15 +110,13 @@ dependencies {
     // Coil
     implementation(libs.coil.compose)
 
-    // ML Kit
-    implementation(libs.mlkit.face.detection)
-
     // Coroutines
     implementation(libs.coroutines.core)
     implementation(libs.coroutines.android)
 
     // Feature modules
     implementation(project(":core:common"))
+    implementation(project(":core:designsystem"))
     implementation(project(":feature:gallery"))
     implementation(project(":feature:editor"))
     implementation(project(":feature:beauty"))

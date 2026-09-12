@@ -23,6 +23,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import kotlin.math.ceil
+import codes.pepper.whimsicalart.core.designsystem.LocalUiScale
 
 @Composable
 fun BlurBrushOverlay(
@@ -32,9 +33,18 @@ fun BlurBrushOverlay(
     onDragMove: (Offset) -> Unit,
     onDragEnd: () -> Unit,
     modifier: Modifier = Modifier,
-    brushingEnabled: Boolean = true
+    brushingEnabled: Boolean = true,
+    /**
+     * True when the preview is currently showing the REAL blur for the
+     * committed strokes, so only the in-progress stroke keeps the fake
+     * tint overlay (docs/effects_reference.md → Live-applied brush effects).
+     */
+    showLiveResult: Boolean = false
 ) {
-    val all = currentStroke?.let { strokes + it } ?: strokes
+    val all = when {
+        showLiveResult -> currentStroke?.let { listOf(it) } ?: emptyList()
+        else -> currentStroke?.let { strokes + it } ?: strokes
+    }
 
     Canvas(
         modifier = modifier.then(
@@ -120,54 +130,93 @@ fun BlurBrushPanel(
     modifier: Modifier = Modifier
 ) {
     val showClearConfirm = remember { mutableStateOf(false) }
+    val s = LocalUiScale.current
 
-    Column(modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+    Column(modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp * s, vertical = 8.dp * s)) {
         Row(modifier = Modifier.fillMaxWidth()) {
-            Text("Size", modifier = Modifier.padding(end = 8.dp))
+            Text(
+                text = "Size",
+                modifier = Modifier.padding(end = 8.dp * s),
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize = MaterialTheme.typography.bodyMedium.fontSize * s
+                )
+            )
             Slider(
                 value = state.brushSize,
                 onValueChange = onBrushSizeChange,
                 valueRange = 10f..80f,
-                modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
+                modifier = Modifier.weight(1f).padding(horizontal = 8.dp * s)
             )
-            Text("${state.brushSize.toInt()}")
+            Text(
+                text = "${state.brushSize.toInt()}",
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize = MaterialTheme.typography.bodyMedium.fontSize * s
+                )
+            )
         }
         Row(modifier = Modifier.fillMaxWidth()) {
-            Text("Strength", modifier = Modifier.padding(end = 8.dp))
+            Text(
+                text = "Strength",
+                modifier = Modifier.padding(end = 8.dp * s),
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize = MaterialTheme.typography.bodyMedium.fontSize * s
+                )
+            )
             Slider(
                 value = state.opacity,
                 onValueChange = onOpacityChange,
                 valueRange = 0.1f..1f,
-                modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
+                modifier = Modifier.weight(1f).padding(horizontal = 8.dp * s)
             )
-            Text("${(state.opacity * 100).toInt()}%")
+            Text(
+                text = "${(state.opacity * 100).toInt()}%",
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize = MaterialTheme.typography.bodyMedium.fontSize * s
+                )
+            )
         }
         Row(modifier = Modifier.fillMaxWidth()) {
+            val chipLabelStyle = MaterialTheme.typography.labelMedium.copy(
+                fontSize = MaterialTheme.typography.labelMedium.fontSize * s
+            )
             FilterChip(
                 selected = state.isErasing,
                 onClick = onToggleErasing,
-                label = { Text("Eraser") },
+                label = { Text("Eraser", style = chipLabelStyle) },
                 colors = androidx.compose.material3.FilterChipDefaults.filterChipColors(
                     selectedContainerColor = MaterialTheme.colorScheme.tertiary,
                     selectedLabelColor = MaterialTheme.colorScheme.onTertiary
                 )
             )
-            TextButton(onClick = { showClearConfirm.value = true }) { Text("Clear All") }
+            TextButton(onClick = { showClearConfirm.value = true }) {
+                Text(
+                    "Clear All",
+                    style = MaterialTheme.typography.labelLarge.copy(
+                        fontSize = MaterialTheme.typography.labelLarge.fontSize * s
+                    )
+                )
+            }
         }
     }
 
     if (showClearConfirm.value) {
+        val dialogStyle = MaterialTheme.typography.bodyLarge.copy(
+            fontSize = MaterialTheme.typography.bodyLarge.fontSize * s
+        )
+        val dialogTitleStyle = MaterialTheme.typography.titleLarge.copy(
+            fontSize = MaterialTheme.typography.titleLarge.fontSize * s
+        )
         AlertDialog(
             onDismissRequest = { showClearConfirm.value = false },
-            title = { Text("Clear blur strokes?") },
+            title = { Text("Clear blur strokes?", style = dialogTitleStyle) },
             confirmButton = {
                 TextButton(onClick = {
                     onClear()
                     showClearConfirm.value = false
-                }) { Text("Clear") }
+                }) { Text("Clear", style = dialogStyle) }
             },
             dismissButton = {
-                TextButton(onClick = { showClearConfirm.value = false }) { Text("Cancel") }
+                TextButton(onClick = { showClearConfirm.value = false }) { Text("Cancel", style = dialogStyle) }
             }
         )
     }

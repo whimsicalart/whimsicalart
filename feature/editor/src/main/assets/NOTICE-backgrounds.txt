@@ -6,12 +6,12 @@ Pexels (https://www.pexels.com) and are licensed under the Pexels License,
 which permits free commercial and non-commercial use without attribution.
 For details see https://www.pexels.com/license/
 
-Photos used:
-- bg_landscape.jpg  Pexels photo 933054
-- bg_office.jpg     Pexels photo 380769
-- bg_park.jpg       Pexels photo 1257110
-- bg_library.jpg    Pexels photo 2041540
-- bg_coffee.jpg     Pexels photo 302899
-- bg_mountains.jpg  Pexels photo 417074
-- bg_room.jpg       Pexels photo 1571460
-- bg_city.jpg       Pexels photo 466685
+Photos used (original full-size files bundled):
+- bg_landscape.jpg  https://www.pexels.com/photo/933054/
+- bg_office.jpg     https://www.pexels.com/photo/380769/
+- bg_park.jpg       https://www.pexels.com/photo/1257110/
+- bg_library.jpg    https://www.pexels.com/photo/2041540/
+- bg_coffee.jpg     https://www.pexels.com/photo/302899/
+- bg_mountains.jpg  https://www.pexels.com/photo/417074/
+- bg_room.jpg       https://www.pexels.com/photo/1571460/
+- bg_city.jpg       https://www.pexels.com/photo/466685/

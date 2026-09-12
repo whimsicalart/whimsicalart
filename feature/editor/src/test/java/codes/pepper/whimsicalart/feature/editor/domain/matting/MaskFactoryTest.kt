@@ -3,6 +3,7 @@ package codes.pepper.whimsicalart.feature.editor.domain.matting
 import android.graphics.Bitmap
 import android.graphics.Color
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertArrayEquals
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -51,5 +52,55 @@ class MaskFactoryTest {
 
         assertEquals(255, Color.alpha(hard.getPixel(0, 0)))
         assertEquals(0, Color.alpha(hard.getPixel(0, 1)))
+    }
+
+    private fun pixels(bmp: Bitmap): IntArray {
+        val p = IntArray(bmp.width * bmp.height)
+        bmp.getPixels(p, 0, bmp.width, 0, 0, bmp.width, bmp.height)
+        return p
+    }
+
+    @Test
+    fun from_confidence_is_byte_identical_to_the_scalar_per_pixel_write() {
+        // The batched IntArray + setPixels write-out must reproduce the
+        // per-pixel setPixel path exactly, including clamped end values.
+        val w = 9
+        val h = 7
+        val confidence = FloatArray(w * h) { (it % 31) / 37f }
+        val mask = MaskFactory.fromConfidence(confidence, w, h)
+
+        val scalar = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val a = (confidence[y * w + x] * 255f).toInt().coerceIn(0, 255)
+                scalar.setPixel(x, y, Color.argb(a, 255, 255, 255))
+            }
+        }
+        assertArrayEquals(pixels(scalar), pixels(mask))
+    }
+
+    @Test
+    fun threshold_is_byte_identical_to_the_scalar_per_pixel_reference() {
+        // An alpha ramp through 0..255 exercises every boundary side; the
+        // batched read+threshold+write must equal the per-pixel getPixel/setPixel
+        // shape, with RGB pinned to white on both sides of the cut.
+        val w = 32
+        val h = 8
+        val src = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                src.setPixel(x, y, Color.argb(y * 32 + x, 40, 80, 120))
+            }
+        }
+        val hard = MaskFactory.threshold(src, level = 128)
+
+        val scalar = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val a = if (Color.alpha(src.getPixel(x, y)) >= 128) 255 else 0
+                scalar.setPixel(x, y, Color.argb(a, 255, 255, 255))
+            }
+        }
+        assertArrayEquals(pixels(scalar), pixels(hard))
     }
 }

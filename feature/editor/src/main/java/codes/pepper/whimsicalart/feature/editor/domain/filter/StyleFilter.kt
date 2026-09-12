@@ -46,8 +46,28 @@ object StyleFilterProcessor : StyleFilterApplier {
         val px = IntArray(w * h)
         source.getPixels(px, 0, w, 0, 0, w, h)
         val out = IntArray(w * h)
-        for (i in px.indices) {
-            out[i] = map(px[i], filter)
+        if (filter == StyleFilter.FILMIC) {
+            // The S-curve input is a pure function of a single 0..255 channel
+            // value, so its three per-channel forms are 256-entry LUTs computed
+            // once per apply (3 transcendentals/px -> 3 array loads/px). Integer
+            // index × float + float is deterministic IEEE, so the lookup is
+            // bit-exact; only the +4/+2/-2 tone offset stays per-pixel.
+            val lutR = IntArray(256) { curve(it * 0.90f + 8f) }
+            val lutG = IntArray(256) { curve(it * 0.96f) }
+            val lutB = IntArray(256) { curve(it * 0.88f + 6f) }
+            for (i in px.indices) {
+                val p = px[i]
+                out[i] = Color.argb(
+                    Color.alpha(p),
+                    lutR[Color.red(p)] + 4,
+                    lutG[Color.green(p)] + 2,
+                    lutB[Color.blue(p)] - 2
+                )
+            }
+        } else {
+            for (i in px.indices) {
+                out[i] = map(px[i], filter)
+            }
         }
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         result.setPixels(out, 0, w, 0, 0, w, h)
@@ -58,13 +78,16 @@ object StyleFilterProcessor : StyleFilterApplier {
         val r = Color.red(p)
         val g = Color.green(p)
         val b = Color.blue(p)
+        // Color.argb keeps the source alpha: Color.rgb would force 0xFF and turn
+        // transparent areas (premultiplied black) opaque black.
+        val srcAlpha = Color.alpha(p)
         return when (filter) {
             StyleFilter.FILMIC -> {
                 // Gentle S-curve: deepen blacks, warm highlights, cool shadows.
                 val tr = curve(r * 0.90f + 8f) + 4
                 val tg = curve(g * 0.96f) + 2
                 val tb = curve(b * 0.88f + 6f) - 2
-                Color.rgb(tr, tg, tb)
+                Color.argb(srcAlpha, tr, tg, tb)
             }
             StyleFilter.VIBRANT -> {
                 // Boost chroma and expand midtone contrast.
@@ -76,7 +99,8 @@ object StyleFilterProcessor : StyleFilterApplier {
                 val b2 = (b * s + l * inv)
                 val c = 1.06f
                 val mid = 127.5f
-                Color.rgb(
+                Color.argb(
+                    srcAlpha,
                     clip((r2 - mid) * c + mid),
                     clip((g2 - mid) * c + mid),
                     clip((b2 - mid) * c + mid)
@@ -93,7 +117,8 @@ object StyleFilterProcessor : StyleFilterApplier {
                 val lift = 10f
                 val c = 0.9f
                 val mid = 127.5f
-                Color.rgb(
+                Color.argb(
+                    srcAlpha,
                     clip((r2 - mid) * c + mid + lift),
                     clip((g2 - mid) * c + mid + lift),
                     clip((b2 - mid) * c + mid + lift)
