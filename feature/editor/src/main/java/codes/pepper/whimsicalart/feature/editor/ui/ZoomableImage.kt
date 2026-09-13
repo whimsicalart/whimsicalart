@@ -34,20 +34,22 @@ import kotlin.math.abs
  * live preview (matching zoom, pan, rotation and flips).
  */
 class ViewportTransform {
-    var scale by mutableFloatStateOf(1f)
+    // docs/effect_stack.md → Scale terms: `canvasZoom` — the user's viewport
+    // magnification relative to the fitted letterbox image (1.0 = fitted).
+    var canvasZoom by mutableFloatStateOf(1f)
     var offsetX by mutableFloatStateOf(0f)
     var offsetY by mutableFloatStateOf(0f)
 
     /** Resets pan/zoom to the default (image fits, no offset). */
     fun reset() {
-        scale = 1f
+        canvasZoom = 1f
         offsetX = 0f
         offsetY = 0f
     }
 
-    /** Overwrites this transform with [other]'s scale and offsets. */
+    /** Overwrites this transform with [other]'s canvasZoom and offsets. */
     fun copyFrom(other: ViewportTransform) {
-        scale = other.scale
+        canvasZoom = other.canvasZoom
         offsetX = other.offsetX
         offsetY = other.offsetY
     }
@@ -171,7 +173,7 @@ fun ZoomableImage(
                                     }
                                     if (pastTouchSlop) {
                                         if (panZoomEnabled) {
-                                            transform.scale = (transform.scale * zoomChange).coerceIn(0.5f, 5f)
+                                            transform.canvasZoom = (transform.canvasZoom * zoomChange).coerceIn(0.5f, 5f)
                                             transform.offsetX += panChange.x
                                             transform.offsetY += panChange.y
                                         }
@@ -192,8 +194,8 @@ fun ZoomableImage(
                 }
             )
             .graphicsLayer {
-                this.scaleX = transform.scale * if (flipHorizontal) -1f else 1f
-                this.scaleY = transform.scale * if (flipVertical) -1f else 1f
+                this.scaleX = transform.canvasZoom * if (flipHorizontal) -1f else 1f
+                this.scaleY = transform.canvasZoom * if (flipVertical) -1f else 1f
                 rotationZ = rotation
                 translationX = transform.offsetX
                 translationY = transform.offsetY

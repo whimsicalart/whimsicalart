@@ -158,6 +158,7 @@ internal fun EditorToolPanelHost(
             MosaicPanel(
                 state = mosaicState,
                 imageUri = uiState.imageUri,
+                faceDetectionAvailable = mosaicViewModel.faceDetectorAvailable,
                 onBrushSizeChange = { mosaicViewModel.updateBrushSize(it) },
                 onOpacityChange = { mosaicViewModel.updateOpacity(it) },
                 onToggleErasing = { mosaicViewModel.toggleErasing() },

@@ -28,6 +28,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -43,6 +44,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import codes.pepper.whimsicalart.core.designsystem.LocalUiScale
 import codes.pepper.whimsicalart.feature.beauty.ui.BeautyBrushOverlay
@@ -65,6 +67,7 @@ import codes.pepper.whimsicalart.feature.editor.ui.text.TextBlurFrame
 import codes.pepper.whimsicalart.feature.editor.ui.text.TextEditorUiState
 import codes.pepper.whimsicalart.feature.editor.ui.text.TextEditorViewModel
 import codes.pepper.whimsicalart.feature.editor.ui.text.TextOverlayLayer
+import codes.pepper.whimsicalart.feature.editor.ui.text.resolveLiveTextBlurSource
 import codes.pepper.whimsicalart.feature.editor.ui.viewmodel.EditTool
 import codes.pepper.whimsicalart.feature.editor.ui.viewmodel.EditorUiState
 import codes.pepper.whimsicalart.feature.editor.ui.viewmodel.EditorViewModel
@@ -111,24 +114,44 @@ internal fun ColumnScope.EditorCanvasArea(
     onCanvasBoxSized: (Size) -> Unit,
     controls: @Composable () -> Unit
 ) {
-    // Letterboxed canvas: it spans the full available width and its height is
-    // min(available width, available height − 56 dp × uiScale − 200 dp × uiScale)
-    // so the eye row keeps its own fixed band and the tool controls below keep
-    // at least 200 dp × uiScale. Sizing the canvas this way also scopes every
-    // gesture to it: touches over the controls region below hit the controls
-    // (which scroll) and can never reach the canvas' pan/zoom, hold-to-compare,
-    // or brush/placement gesture handlers.
+    // Letterboxed canvas: the window splits its budget letterbox-FIRST — the
+    // canvas takes its square cap → 50% floor → remainder, and the tool controls
+    // absorb every dp the letterbox leaves unused (no percentage ceiling).
+    // Portrait splits the height below the top bar minus the eye row; landscape
+    // splits the width against the square-cap height (docs/effects_reference.md →
+    // "Canvas layout and gesture scope"). Sizing the canvas this way also scopes
+    // every gesture to it: touches over the controls region below (portrait) or
+    // beside (landscape) hit the controls (which scroll) and can never reach the
+    // canvas' pan/zoom, hold-to-compare, or brush/placement gesture handlers.
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .weight(1f)
     ) {
-        val canvasHeight = portraitCanvasHeight(maxWidth, maxHeight, uiScale)
+        // The panel's NATURAL (wrap-content) height, reported up from the
+        // workspace layout's toolbar + controls measurement and retained for the
+        // scroll-fill threshold: the controls scroll when their content exceeds
+        // the split remainder the workspace gives them. It no longer participates
+        // in the canvas/controls split (the region is sized by the split, not by
+        // wrap content), so the natural height only records whether the active
+        // tool's controls overflow their region.
+        val density = LocalDensity.current
+        var naturalControlsHeight by remember { mutableStateOf(0.dp) }
+        val onControlsNaturallySized: (Dp) -> Unit = {
+            naturalControlsHeight = it.coerceAtLeast(0.dp)
+        }
+
+        // Portrait: the letterbox spans the full available width and takes its
+        // square cap → 50% floor → or the remainder when the window is too short
+        // to hold both floors; the controls region below it is exactly the split
+        // remainder (see portraitLetterboxSplit).
+        val (canvasHeight, _) = portraitLetterboxSplit(maxWidth, maxHeight, uiScale)
+
         // Landscape (visible area wider than tall) mirrors the portrait column:
-        // the canvas moves to the left with width min(available height − 56 dp ×
-        // uiScale, available width − 600 dp × uiScale) and the tool bar + controls
-        // move to a right-side panel at least 600 dp × uiScale wide (see
-        // effects_reference "Canvas layout and gesture scope").
+        // the canvas moves to the left and the tool bar + controls move to a
+        // right-side panel, each sized by the SAME letterbox-first split — the
+        // letterbox takes square cap → 50% floor → remainder and the panel
+        // absorbs the rest (see landscapeLetterboxSplit).
         //
         // Orientation must be derived from the *window* size, not the canvas box.
         // BoxWithConstraints returns the canvas area (window minus the top bar),
@@ -137,7 +160,7 @@ internal fun ColumnScope.EditorCanvasArea(
         // pane dimensions and is safe in split-screen / multi-window / foldable.
         val config = LocalConfiguration.current
         val landscape = isLandscapeLayout(config.screenWidthDp.dp, config.screenHeightDp.dp)
-        val canvasWidth = landscapeCanvasWidth(maxWidth, maxHeight, uiScale)
+        val (canvasWidth, _) = landscapeLetterboxSplit(maxWidth, maxHeight, uiScale)
         val isCatB = isNonPanZoomCapable(uiState.selectedTool, uiState.selectedBeautyTool)
 
         // The canvas content (preview + every tool overlay). The split between
@@ -314,11 +337,17 @@ internal fun ColumnScope.EditorCanvasArea(
                         textEditorViewModel.selectOverlay(overlayId)
                     },
                     interactionEnabled = !eyeEnabled,
-                    sourceBitmap = if (useCompositePreview) {
-                        uiState.compositePreview
-                    } else {
-                        uiState.sharpenedPreview
-                    },
+                    // The live BLUR background needs the photo pixels the canvas
+                    // shows UNDER the block. Over a stack fold that is the
+                    // composite; with a look effect the sharpened preview; on a
+                    // PLAIN photo (the common text-edit start) NEITHER exists, so
+                    // fall back to the oriented base decode the canvas displays —
+                    // without it the blur never appears live.
+                    sourceBitmap = resolveLiveTextBlurSource(
+                        compositePreview = uiState.compositePreview,
+                        sharpenedPreview = uiState.sharpenedPreview,
+                        baseBitmap = uiState.originalBitmap
+                    ),
                     blurFrame = TextBlurFrame(
                         offsetXPx = imageFrame.offsetX,
                         offsetYPx = imageFrame.offsetY,
@@ -474,8 +503,8 @@ internal fun ColumnScope.EditorCanvasArea(
                             // Frames do NOT follow rotate/flip (the same opt-out as
                             // PhotoBoundedLayer's applyTransform = false): scale + pan
                             // only, the frame stays square around the canvas.
-                            scaleX = viewportTransform.scale
-                            scaleY = viewportTransform.scale
+                            scaleX = viewportTransform.canvasZoom
+                            scaleY = viewportTransform.canvasZoom
                             rotationZ = 0f
                             translationX = viewportTransform.offsetX
                             translationY = viewportTransform.offsetY
@@ -553,8 +582,10 @@ internal fun ColumnScope.EditorCanvasArea(
 
         EditorWorkspaceLayout(
             isLandscape = landscape,
+            uiScale = uiScale,
             canvasHeight = canvasHeight,
             canvasWidth = canvasWidth,
+            onControlsNaturallySized = onControlsNaturallySized,
             canvasContentModifier = Modifier
                 // Clip the panned/zoomed preview to its own area so the image
                 // content never draws over the top chrome (TopAppBar + Layers/

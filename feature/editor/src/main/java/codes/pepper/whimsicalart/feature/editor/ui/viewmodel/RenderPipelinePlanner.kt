@@ -18,11 +18,11 @@ import kotlin.math.roundToInt
  * Owns the EDITOR'S FOLD-PIPELINE PLANNING policy (docs/effect_stack.md →
  * Performance / preview cache + Choosing preview resolution + The full-size
  * image model): how big a preview composite must be given the visible viewport
- * and zoom ([previewScaleFor]/[quantizedScale]), what base resolution every fold
- * is derived from (the pristine EXIF-oriented source decode and its
- * `firstFull`/`firstPreview` bases, plus the scale-bucketed downscales), and the
- * memoized full-size output-footprint estimate that lets a crop/transform
- * re-shape that decision ([estimateStackFootprint]).
+ * and canvasZoom ([previewScaleFor]/[quantizePreviewScale]), what base
+ * resolution every fold is derived from (the pristine EXIF-oriented source
+ * decode and its `firstFull`/`firstPreview` bases, plus the scale-bucketed
+ * downscales), and the memoized full-size output-footprint estimate that lets a
+ * crop/transform re-shape that decision ([estimateStackFootprint]).
  *
  * The class is deliberately state-bearing but PASSIVE: it keeps no coroutines,
  * no UI state and no renderer. The ViewModel decides WHEN a fold runs, owns the
@@ -40,10 +40,19 @@ internal class RenderPipelinePlanner(
     // planner's only awareness of the on-screen canvas — everything else
     // (pan/zoom composition) is a pure Compose transform. Drives the
     // preview-resolution computation ([previewScaleFor]). Set via
-    // [setViewBox]/[setZoom].
+    // [setViewBox]/[setCanvasZoom].
     internal var viewportWidthPx = 0
     internal var viewportHeightPx = 0
-    internal var viewZoom = 1f
+    // docs/effect_stack.md → Scale terms: `canvasZoom` — the user's viewport
+    // magnification relative to the fitted letterbox image (1.0 = fitted;
+    // pinch-clamped 0.5×–5×).
+    internal var canvasZoom = 1f
+    // docs/effect_stack.md → Scale terms: `canvasFitScale` — a bitmap's
+    // on-screen side ÷ its own pixel side (the letterbox fit ratio of the
+    // displayed preview composite, before any user zoom). Fed by the ViewModel
+    // from the planned fold footprint on each pass; with [canvasZoom] it forms
+    // [displayScale] — the magnification that decides the full-size threshold.
+    internal var canvasFitScale = 1f
 
     // The full-size fold base and its preview-resolution counterpart
     // (docs/effect_stack.md → The full-size image model + Choosing preview
@@ -72,42 +81,83 @@ internal class RenderPipelinePlanner(
         viewportHeightPx = h
     }
 
-    fun setZoom(zoom: Float) {
-        viewZoom = zoom.coerceIn(0.5f, 5f)
+    fun setCanvasZoom(canvasZoom: Float) {
+        this.canvasZoom = canvasZoom.coerceIn(0.5f, 5f)
     }
 
     /**
-     * The preview resolution scale (relative to the fold base, ≤ 1): the visible
-     * pixel footprint at the effective zoom (capped at 100% — beyond that the
-     * full-size fold is produced alongside) plus a [PREVIEW_MARGIN] pad, divided
-     * by the base's longest side. [sourceWidth]/[sourceHeight] are the ACTUAL
-     * base dims (the bounded, EXIF-oriented decode capped at
-     * [SEGMENT_SOURCE_MAX_DIM]) — for a 4000px source capped to 2000px on a
-     * 1080px viewport this is ~0.675 at 100% zoom. Never below 5% of the base
-     * (a face ML segment still needs enough texture to be accurate).
+     * The total on-screen magnification of the preview-sized image (preview px →
+     * screen px; docs/effect_stack.md → Scale terms): `canvasFitScale` ×
+     * `canvasZoom`. **> 1 is the one condition that means "the visible pixels
+     * outgrow the preview bitmap — a full-size fold must be produced"** (save /
+     * merge / share aside); while `displayScale` ≤ 1 the preview bitmap merely
+     * upscales.
      */
+    val displayScale: Float
+        get() = canvasZoom.coerceIn(0.5f, 5f) * canvasFitScale
+
     /**
-     * The fold cache's resolution key: [scale] snapped to 5%-bucket granularity
-     * (0.05 steps, at least one bucket). A zoom that stays within a bucket
-     * reuses the cached composite at the nearest size (the display scales it,
-     * imperceptibly); crossing a bucket re-folds at the new size. Rounds UP
-     * (ceiling) so the rasterized preview is ALWAYS at least the padded visible
-     * footprint (`viewportMax × effectiveZoom × PREVIEW_MARGIN`) — a down-round
-     * can undershoot the display footprint and show a (slightly) upscaled,
-     * softer image. Keeps a pinch gesture from rebuilding the preview composite
-     * on every tick.
+     * The fold cache's resolution key: [previewScale] snapped to 5%-bucket
+     * granularity (0.05 steps, at least one bucket). A canvasZoom that stays
+     * within a bucket reuses the cached composite at the nearest size (the
+     * display scales it, imperceptibly); crossing a bucket re-folds at the new
+     * size. Rounds UP (ceiling) so the rasterized preview is ALWAYS at least the
+     * padded visible footprint (`viewportMax × effectiveCanvasZoom ×
+     * PREVIEW_MARGIN`) — a down-round can undershoot the display footprint and
+     * show a (slightly) upscaled, softer image. Keeps a pinch gesture from
+     * rebuilding the preview composite on every tick.
      */
-    fun quantizedScale(scale: Float): Float {
-        if (scale >= 1f) return 1f
-        return (ceil(scale * 20f) / 20f).coerceIn(0.05f, 1f)
+    fun quantizePreviewScale(previewScale: Float): Float {
+        if (previewScale >= 1f) return 1f
+        return (ceil(previewScale * 20f) / 20f).coerceIn(0.05f, 1f)
     }
 
     fun previewScaleFor(sourceWidth: Int, sourceHeight: Int): Float {
         val sourceMax = maxOf(sourceWidth, sourceHeight).coerceAtLeast(1)
         val viewportMax = maxOf(viewportWidthPx, viewportHeightPx).coerceAtLeast(1)
-        val effectiveZoom = viewZoom.coerceIn(0.5f, 1f)
-        val previewMax = viewportMax * effectiveZoom * PREVIEW_MARGIN
-        return quantizedScale((previewMax / sourceMax).coerceIn(0.05f, 1f))
+        val effectiveCanvasZoom = canvasZoom.coerceIn(0.5f, 1f)
+        val previewMax = viewportMax * effectiveCanvasZoom * PREVIEW_MARGIN
+        return quantizePreviewScale((previewMax / sourceMax).coerceIn(0.05f, 1f))
+    }
+
+    /**
+     * The PINNED preview scale for a footprint (docs/effect_stack.md → *Choosing
+     * preview resolution* + *Resolution glossary*): `min(1, previewSizeMaxSide /
+     * maxSide)`. Every layer's committed preview and the composite preview are
+     * produced at THEIR OWN pinned scale, so their max side equals the fixed,
+     * orientation-invariant [previewSizeMaxSide] (capped at the footprint's own
+     * max side when that is already smaller than the ceiling — never an upscale).
+     * Unlike [previewScaleFor] — which derives the resolution from the visible
+     * viewport and zoom (the sharpen stand-in path) — this is viewport- AND
+     * zoom-INDEPENDENT: a window resize / zoom change never re-dimensions or
+     * re-folds a preview image, only [canvasFitScale] moves.
+     */
+    fun pinnedPreviewScale(footprintWidth: Int, footprintHeight: Int): Float {
+        ensurePreviewCeiling()
+        val maxSide = maxOf(footprintWidth, footprintHeight).coerceAtLeast(1)
+        return quantizePreviewScale((previewSizeMaxSide.toFloat() / maxSide).coerceIn(0.05f, 1f))
+    }
+
+    /**
+     * Recomputed the window-following letterbox fit ratio of the pinned composite
+     * ([canvasFitScale]): the composite's on-screen max side (its pixels
+     * letterboxed [ContentScale.Fit]-style into the viewport) ÷ its pixel max
+     * side. Pure function of the current viewport and the composite's pixel
+     * footprint (which is pinned — window- and zoom-independent). Called on every
+     * viewport change so rotating / split-resizing the window moves
+     * `displayScale = canvasFitScale × canvasZoom` WITHOUT re-folding or
+     * re-dimensioning any preview bitmap.
+     */
+    fun recomputeCanvasFitScale(compositeWidth: Int, compositeHeight: Int) {
+        if (viewportWidthPx <= 0 || viewportHeightPx <= 0 ||
+            compositeWidth <= 0 || compositeHeight <= 0
+        ) {
+            return
+        }
+        canvasFitScale = minOf(
+            viewportWidthPx.toFloat() / compositeWidth,
+            viewportHeightPx.toFloat() / compositeHeight
+        )
     }
 
     /**
@@ -222,7 +272,7 @@ internal class RenderPipelinePlanner(
         if (scale >= 1f) return firstFullBase()
         val first = firstPreviewBase() ?: return null
         val full = firstFullBase() ?: return null
-        // Bucket index matches quantizedScale's 0.05-bucket key so the base and
+        // Bucket index matches quantizePreviewScale's 0.05-bucket key so the base and
         // the fold cache always agree on which resolution is in play.
         val key = (scale * 20f).roundToInt().coerceAtLeast(1)
         previewOriginalScaleCache[key]?.let { if (!it.isRecycled) return it }

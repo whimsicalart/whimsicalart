@@ -117,6 +117,7 @@ import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import coil.compose.rememberAsyncImagePainter
 import codes.pepper.whimsicalart.core.designsystem.LocalUiScale
+import codes.pepper.whimsicalart.core.domain.GeometryAnchor
 import codes.pepper.whimsicalart.feature.editor.domain.EditorRenderBundle
 import codes.pepper.whimsicalart.feature.editor.domain.EditorColorMatrix
 import codes.pepper.whimsicalart.feature.editor.domain.BackgroundLayer
@@ -129,6 +130,9 @@ import codes.pepper.whimsicalart.feature.editor.domain.StrokeLayer
 import codes.pepper.whimsicalart.feature.editor.domain.PenBrushKind
 import codes.pepper.whimsicalart.feature.editor.domain.StrokeType
 import codes.pepper.whimsicalart.feature.editor.domain.BeautyStackEffect
+import codes.pepper.whimsicalart.feature.editor.domain.PositionalReconcilers
+import codes.pepper.whimsicalart.feature.editor.domain.toFramePixels
+import codes.pepper.whimsicalart.feature.editor.domain.toBeautyEffects
 import codes.pepper.whimsicalart.feature.editor.domain.TextItem
 import codes.pepper.whimsicalart.feature.editor.domain.renderEmojiGlyph
 import codes.pepper.whimsicalart.feature.editor.domain.filter.StyleFilter
@@ -149,16 +153,20 @@ import codes.pepper.whimsicalart.feature.stickers.ui.StickerPickerPanel
 import codes.pepper.whimsicalart.feature.stickers.ui.viewmodel.StickersViewModel
 import codes.pepper.whimsicalart.feature.editor.ui.blur.BlurBrushOverlay
 import codes.pepper.whimsicalart.feature.editor.ui.blur.BlurBrushPanel
+import codes.pepper.whimsicalart.feature.editor.ui.blur.BlurStroke
 import codes.pepper.whimsicalart.feature.editor.ui.blur.BlurViewModel
 import codes.pepper.whimsicalart.feature.editor.ui.mosaic.MosaicOverlay
 import codes.pepper.whimsicalart.feature.editor.ui.mosaic.MosaicPanel
+import codes.pepper.whimsicalart.feature.editor.ui.mosaic.MosaicStroke
 import codes.pepper.whimsicalart.feature.editor.ui.mosaic.MosaicViewModel
 import codes.pepper.whimsicalart.feature.editor.ui.pen.PenBrushPanel
 import codes.pepper.whimsicalart.feature.editor.ui.pen.PenBrushType
+import codes.pepper.whimsicalart.feature.editor.ui.pen.PenStroke
 import codes.pepper.whimsicalart.feature.editor.ui.pen.PenStrokeOverlay
 import codes.pepper.whimsicalart.feature.editor.ui.pen.PenViewModel
 import codes.pepper.whimsicalart.feature.editor.ui.removal.RemovalOverlay
 import codes.pepper.whimsicalart.feature.editor.ui.removal.RemovalPanel
+import codes.pepper.whimsicalart.feature.editor.ui.removal.RemovalStroke
 import codes.pepper.whimsicalart.feature.editor.ui.removal.RemovalViewModel
 import codes.pepper.whimsicalart.feature.editor.ui.background.BackgroundPanel
 import codes.pepper.whimsicalart.feature.editor.ui.text.TextEditorPanel
@@ -190,9 +198,11 @@ import codes.pepper.whimsicalart.feature.editor.domain.BitmapRenderer
 import codes.pepper.whimsicalart.feature.editor.domain.StickerOverlayRenderer
 import codes.pepper.whimsicalart.feature.editor.domain.CropEffect
 import codes.pepper.whimsicalart.feature.editor.domain.TransformEffect
+import codes.pepper.whimsicalart.feature.editor.domain.estimateStackOutputSize
 import codes.pepper.whimsicalart.feature.editor.domain.stickerLinePaint
 import codes.pepper.whimsicalart.feature.editor.domain.stickerSilhouettePath
 import codes.pepper.whimsicalart.feature.editor.ui.viewmodel.EditorUiState
+import codes.pepper.whimsicalart.feature.editor.ui.viewmodel.buildBeautySpecs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -459,6 +469,31 @@ fun EditorScreen(
     // (previously the whole-box normalization drifted on every letterboxed photo).
     val imageFrame = imageFrameOf(editBoxSize, imageViewSize)
     val density = LocalDensity.current
+
+    // Per-family anchored capture/restore frames (docs/effect_stack.md →
+    // *Positional layers*): each source-space family is normalized against ITS
+    // OWN committed prefix footprint fitted into the box — never the full
+    // composite frame. A transform/crop added AFTER a layer therefore never
+    // silently re-anchors it on the next commit, and a re-entry reconstructs
+    // the overlay from the stored reference geometry instead of re-normalising
+    // against the current composite (which may still reflect the stale,
+    // full-stack dims). `refWidth`/`refHeight` are the full-size prefix
+    // footprint each captured fraction is stored against.
+    //
+    // The prefix is folded from the stack's TRUE base — `baseImageSize`, the
+    // dims the fold actually starts from — never `rotatedImageSize`. The
+    // committed stack ALREADY carries the Transform layer that turns that base
+    // into the rotated footprint, so starting from `rotatedImageSize` would
+    // apply the base rotation TWICE (the "sticker shifts once a transform is
+    // applied" report): the stale double-rotated reference no longer equals the
+    // base the layer folds over, and every later render re-places the object
+    // against that wrong frame.
+    fun familyAnchor(tool: EditTool): FamilyAnchor = familyAnchorFor(
+        uiState.effectStack,
+        tool,
+        uiState.baseImageSize ?: rotatedImageSize,
+        editBoxSize
+    )
     val keyboardFocusRequester = remember { FocusRequester() }
 
     LaunchedEffect(imageUri) {
@@ -492,13 +527,17 @@ fun EditorScreen(
             // Re-entering the tool restores the committed, parameterised
             // TextItem list (the stack entry is the source of truth) so every
             // item stays re-editable; with no committed text we fall back to the
-            // add-as-you-type flow.
+            // add-as-you-type flow. The overlay reconstructs against the TEXT
+            // family's OWN anchored frame, and each item carries its stored
+            // reference base — so a transform added after the text never
+            // dislodges the restored overlay from where the render shows it.
             val textEffect = uiState.effectStack.lastOrNull { it is TextEffect } as? TextEffect
             if (textEffect != null && textEffect.layers.isNotEmpty()) {
+                val textFrame = familyAnchor(EditTool.TEXT).frame
                 val restored = textEffect.layers.map { item ->
                     item.toTextOverlay(
-                        density, imageFrame.size.width, imageFrame.size.height,
-                        imageFrame.offsetX, imageFrame.offsetY
+                        density, textFrame.size.width, textFrame.size.height,
+                        textFrame.offsetX, textFrame.offsetY
                     )
                 }
                 textEditorViewModel.restoreOverlays(restored)
@@ -509,20 +548,97 @@ fun EditorScreen(
         if (uiState.selectedTool == EditTool.STICKERS) {
             // Re-entering the tool restores the committed, parameterised
             // StickerItem list (the stack entry is the source of truth) so every
-            // placement stays re-editable and selectable.
+            // placement stays re-editable and selectable — against the STICKERS
+            // family's own anchored frame and the item's stored reference base.
             val stickerEffect = uiState.effectStack.lastOrNull { it is StickerEffect } as? StickerEffect
             if (stickerEffect != null && stickerEffect.layers.isNotEmpty()) {
+                val stickerFrame = familyAnchor(EditTool.STICKERS).frame
                 val restored = stickerEffect.layers.mapNotNull { item ->
                     val base = item.baseSizeDp()
                     base?.let {
                         item.toStickerPlacement(
-                            density, imageFrame.size.width, imageFrame.size.height,
-                            it, imageFrame.offsetX, imageFrame.offsetY
+                            density, stickerFrame.size.width, stickerFrame.size.height,
+                            it, stickerFrame.offsetX, stickerFrame.offsetY,
+                            item.referenceWidth, item.referenceHeight
                         )
                     }
                 }
                 if (restored.size == stickerEffect.layers.size) {
                     stickersViewModel.restoreOverlays(restored)
+                }
+            }
+        }
+        // Brush tools: re-entering the tool re-presents the COMMITTED strokes
+        // through the family's CURRENT anchored frame (docs/effect_stack.md →
+        // *Positional layers*), so a brush never rides stale screen positions
+        // after an earlier effect changed the layer's base — mirroring the
+        // sticker/text re-entry restore.
+        val brushTool = when (uiState.selectedTool) {
+            EditTool.MOSAIC -> EditTool.MOSAIC
+            EditTool.BLUR_BRUSH -> EditTool.BLUR_BRUSH
+            EditTool.PEN -> EditTool.PEN
+            EditTool.OBJECT_REMOVAL -> EditTool.OBJECT_REMOVAL
+            else -> null
+        }
+        if (brushTool != null) {
+            val effect = uiState.effectStack.lastOrNull {
+                it is BitmapDiffEffect && it.tool == brushTool
+            } as? BitmapDiffEffect
+            if (effect != null && effect.strokes.isNotEmpty()) {
+                val a = familyAnchor(brushTool)
+                val frame = a.frame
+                val restored = effect.strokes.mapIndexed { i, stroke ->
+                    val (pts, size) = stroke.toFramePixels(
+                        frame.offsetX, frame.offsetY, frame.size.width, frame.size.height
+                    )
+                    when (brushTool) {
+                        EditTool.MOSAIC -> MosaicStroke(
+                            id = "restored:$i",
+                            points = pts.map { (x, y) -> Offset(x, y) },
+                            brushSize = size,
+                            opacity = stroke.opacity
+                        )
+                        EditTool.BLUR_BRUSH -> BlurStroke(
+                            id = "restored:$i",
+                            points = pts.map { (x, y) -> Offset(x, y) },
+                            brushSize = size,
+                            opacity = stroke.opacity
+                        )
+                        EditTool.PEN -> PenStroke(
+                            id = "restored:$i",
+                            points = pts.map { (x, y) -> Offset(x, y) },
+                            brushType = when (stroke.brush) {
+                                PenBrushKind.GLOW -> PenBrushType.GLOW
+                                PenBrushKind.NEON -> PenBrushType.NEON
+                                PenBrushKind.RAINBOW -> PenBrushType.RAINBOW
+                                PenBrushKind.SOLID -> PenBrushType.SOLID
+                            },
+                            color = Color(stroke.color ?: android.graphics.Color.BLACK),
+                            size = size,
+                            opacity = stroke.opacity,
+                            hardness = stroke.hardness.coerceIn(0f, 1f)
+                        )
+                        else -> RemovalStroke(
+                            id = "restored:$i",
+                            points = pts.map { (x, y) -> Offset(x, y) },
+                            brushSize = size
+                        )
+                    }
+                }
+                when (brushTool) {
+                    EditTool.MOSAIC -> mosaicViewModel.restoreStrokes(
+                        restored.mapNotNull { it as? MosaicStroke }
+                    )
+                    EditTool.BLUR_BRUSH -> blurViewModel.restoreStrokes(
+                        restored.mapNotNull { it as? BlurStroke }
+                    )
+                    EditTool.PEN -> penViewModel.restoreStrokes(
+                        restored.mapNotNull { it as? PenStroke }
+                    )
+                    EditTool.OBJECT_REMOVAL -> removalViewModel.restoreStrokes(
+                        restored.mapNotNull { it as? RemovalStroke }
+                    )
+                    else -> Unit
                 }
             }
         }
@@ -645,82 +761,123 @@ fun EditorScreen(
     val lastGoodStickerItems = remember { mutableStateOf<List<StickerItem>>(emptyList()) }
 
     fun buildRenderBundle(): EditorRenderBundle {
-        // The capture/normalize space for every source-space tool is the FITTED
-        // image rect (letterbox offset removed), so a point drawn over the image
-        // bakes to the exact source fraction it occupies on screen — never the
-        // whole-box fraction (which drifted on any letterboxed photo, P2).
+        // The capture/normalize space for every source-space family is ITS OWN
+        // anchored frame (docs/effect_stack.md → *Positional layers*): the
+        // family's committed PREFIX footprint fitted into the box — never the
+        // full composite frame. A transform/crop added AFTER a layer must not
+        // reset that layer's position, and each captured fraction is stored
+        // against the full-size prefix footprint (`refWidth`/`refHeight`) so
+        // the same fractions map through any later base change via a uniform
+        // centre-origin fit.
         val fr = imageFrame
-        fun norm(p: Offset): Pair<Float, Float> =
+        fun norm(p: Offset, fr: ImageCanvasFrame): Pair<Float, Float> =
             if (fr.size.width > 0f && fr.size.height > 0f) {
                 ((p.x - fr.offsetX) / fr.size.width) to ((p.y - fr.offsetY) / fr.size.height)
             } else {
                 0f to 0f
             }
-        fun normWidth(px: Float): Float =
+        fun normWidth(px: Float, fr: ImageCanvasFrame): Float =
             if (fr.size.width > 0f) px / fr.size.width else 0f
 
-        val stickerItems = if (fr.size.width > 0f && fr.size.height > 0f) {
-            stickersState.placedStickers.mapNotNull { placement ->
+        val stickerAnchor = familyAnchor(EditTool.STICKERS)
+        val storedStickers =
+            (uiState.effectStack.lastOrNull { it is StickerEffect } as? StickerEffect)?.layers
+        val stickerItems = if (stickerAnchor.frame.size.width > 0f && stickerAnchor.frame.size.height > 0f) {
+            val derived = stickersState.placedStickers.mapNotNull { placement ->
                 val sticker = StickerPresets.getStickerById(placement.stickerId)
-                placement.toStickerItem(sticker, density, fr.size.width, fr.size.height, fr.offsetX, fr.offsetY)
-            }.also { lastGoodStickerItems.value = it }
+                placement.toStickerItem(
+                    sticker, density,
+                    stickerAnchor.frame.size.width, stickerAnchor.frame.size.height,
+                    stickerAnchor.frame.offsetX, stickerAnchor.frame.offsetY,
+                    stickerAnchor.refWidth, stickerAnchor.refHeight
+                )
+            }
+            // Freeze the committed reference (never refresh it on an unrelated
+            // rebuild); re-anchor only when the layer's own base changed
+            // (docs/effect_stack.md → *Positional layers*, rules 1+4).
+            PositionalReconcilers.stickers(
+                stored = storedStickers,
+                storedRef = storedRefOfStickers(storedStickers),
+                derived = derived,
+                newBase = anchorOf(stickerAnchor)
+            ).also { lastGoodStickerItems.value = it }
         } else {
             // Degenerate fitted rect (transient mid-zoom / mid-rebound): keep the
             // last valid fold so placed stickers survive instead of vanishing.
             lastGoodStickerItems.value
         }
 
-        val textLayers = textState.textOverlays.map { overlay ->
-            overlay.toTextItem(density, fr.size.width, fr.size.height, fr.offsetX, fr.offsetY)
-        }
+        val textAnchor = familyAnchor(EditTool.TEXT)
+        val storedTexts = (uiState.effectStack.lastOrNull { it is TextEffect } as? TextEffect)?.layers
+        val textLayers = PositionalReconcilers.texts(
+            stored = storedTexts,
+            storedRef = storedRefOfTexts(storedTexts),
+            derived = textState.textOverlays.map { overlay ->
+                overlay.toTextItem(
+                    density,
+                    textAnchor.frame.size.width, textAnchor.frame.size.height,
+                    textAnchor.frame.offsetX, textAnchor.frame.offsetY,
+                    textAnchor.refWidth, textAnchor.refHeight
+                )
+            },
+            newBase = anchorOf(textAnchor)
+        )
 
         val strokeLayers = buildList {
-            mosaicState.strokes.forEach { s ->
-                add(
-                    StrokeLayer(
-                        type = StrokeType.MOSAIC,
-                        points = s.points.map(::norm),
-                        brushSize = normWidth(s.brushSize),
-                        opacity = s.opacity
-                    )
+            val mosaicA = familyAnchor(EditTool.MOSAIC)
+            val storedMosaic = storedStrokes(uiState.effectStack, EditTool.MOSAIC)
+            addAll(PositionalReconcilers.strokes(storedMosaic, storedRefOfStrokes(storedMosaic), mosaicState.strokes.map { s ->
+                StrokeLayer(
+                    type = StrokeType.MOSAIC,
+                    points = s.points.map { norm(it, mosaicA.frame) },
+                    brushSize = normWidth(s.brushSize, mosaicA.frame),
+                    opacity = s.opacity,
+                    referenceWidth = mosaicA.refWidth,
+                    referenceHeight = mosaicA.refHeight
                 )
-            }
-            blurState.strokes.forEach { s ->
-                add(
-                    StrokeLayer(
-                        type = StrokeType.BLUR,
-                        points = s.points.map(::norm),
-                        brushSize = normWidth(s.brushSize),
-                        opacity = s.opacity
-                    )
+            }, anchorOf(mosaicA)))
+            val blurA = familyAnchor(EditTool.BLUR_BRUSH)
+            val storedBlur = storedStrokes(uiState.effectStack, EditTool.BLUR_BRUSH)
+            addAll(PositionalReconcilers.strokes(storedBlur, storedRefOfStrokes(storedBlur), blurState.strokes.map { s ->
+                StrokeLayer(
+                    type = StrokeType.BLUR,
+                    points = s.points.map { norm(it, blurA.frame) },
+                    brushSize = normWidth(s.brushSize, blurA.frame),
+                    opacity = s.opacity,
+                    referenceWidth = blurA.refWidth,
+                    referenceHeight = blurA.refHeight
                 )
-            }
-            penState.strokes.forEach { s ->
-                add(
-                    StrokeLayer(
-                        type = StrokeType.PEN,
-                        points = s.points.map(::norm),
-                        brushSize = normWidth(s.size),
-                        // The pen opacity becomes the colour's alpha so the whole
-                        // stroke (border included) is scaled by it (docs/effects_reference.md
-                        // → Pen controls).
-                        color = s.color.copy(alpha = s.opacity.coerceIn(0f, 1f)).toArgb(),
-                        hardness = s.hardness.coerceIn(0f, 1f),
-                        // Carry the brush type so GLOW / NEON / RAINBOW commit the
-                        // way they preview (hardness remains solid/rainbow only).
-                        brush = s.brushType.toPenBrushKind()
-                    )
+            }, anchorOf(blurA)))
+            val penA = familyAnchor(EditTool.PEN)
+            val storedPen = storedStrokes(uiState.effectStack, EditTool.PEN)
+            addAll(PositionalReconcilers.strokes(storedPen, storedRefOfStrokes(storedPen), penState.strokes.map { s ->
+                StrokeLayer(
+                    type = StrokeType.PEN,
+                    points = s.points.map { norm(it, penA.frame) },
+                    brushSize = normWidth(s.size, penA.frame),
+                    // The pen opacity becomes the colour's alpha so the whole
+                    // stroke (border included) is scaled by it (docs/effects_reference.md
+                    // → Pen controls).
+                    color = s.color.copy(alpha = s.opacity.coerceIn(0f, 1f)).toArgb(),
+                    hardness = s.hardness.coerceIn(0f, 1f),
+                    // Carry the brush type so GLOW / NEON / RAINBOW commit the
+                    // way they preview (hardness remains solid/rainbow only).
+                    brush = s.brushType.toPenBrushKind(),
+                    referenceWidth = penA.refWidth,
+                    referenceHeight = penA.refHeight
                 )
-            }
-            removalState.strokes.forEach { s ->
-                add(
-                    StrokeLayer(
-                        type = StrokeType.REMOVAL,
-                        points = s.points.map(::norm),
-                        brushSize = normWidth(s.brushSize)
-                    )
+            }, anchorOf(penA)))
+            val removalA = familyAnchor(EditTool.OBJECT_REMOVAL)
+            val storedRemoval = storedStrokes(uiState.effectStack, EditTool.OBJECT_REMOVAL)
+            addAll(PositionalReconcilers.strokes(storedRemoval, storedRefOfStrokes(storedRemoval), removalState.strokes.map { s ->
+                StrokeLayer(
+                    type = StrokeType.REMOVAL,
+                    points = s.points.map { norm(it, removalA.frame) },
+                    brushSize = normWidth(s.brushSize, removalA.frame),
+                    referenceWidth = removalA.refWidth,
+                    referenceHeight = removalA.refHeight
                 )
-            }
+            }, anchorOf(removalA)))
         }
 
         val frameLayers = if (fr.size.width > 0f) {
@@ -799,6 +956,11 @@ fun EditorScreen(
     // default is dropped by syncLayerState's orderedMerge. The live preview
     // renders independently of this bookkeeping, so committing here (rather than
     // continuously per param change) never affects the preview.
+    // BEAUTY is committed through this same single path (its "continuous merge
+    // into the stack" was removed — setBeautyEffects now only updates the live
+    // params): buildStackSnapshot derives the beauty sub-set from the params,
+    // so leaving the tool stores exactly what the focused preview showed, in
+    // one reversible layer set.
     val commitCurrentTool: () -> Unit = {
         if (editBoxSize.width > 0f) {
             val snapshot = buildStackSnapshot(uiState = uiState, bundle = buildRenderBundle())
@@ -916,7 +1078,7 @@ fun EditorScreen(
         // resolution.
         val visibleWidthPx = editBoxSize.width.toInt()
         val visibleHeightPx = editBoxSize.height.toInt()
-        val zoom = viewportTransform.scale
+        val canvasZoom = viewportTransform.canvasZoom
         if (isSourceSpaceTool(uiState.selectedTool, uiState.selectedBeautyTool)) {
             // Source-space placement tools draw their own live overlay (strokes /
             // crop grid / stickers / text), so the composite base must be the fold
@@ -936,7 +1098,7 @@ fun EditorScreen(
                 excludeCurrentTool = excludeCurrentTool,
                 visibleWidthPx = visibleWidthPx,
                 visibleHeightPx = visibleHeightPx,
-                zoom = zoom,
+                canvasZoom = canvasZoom,
                 mosaicStrokesVersion = mosaicState.strokesVersion,
                 removalStrokesVersion = removalState.strokesVersion,
                 blurStrokesVersion = blurState.strokesVersion,
@@ -951,22 +1113,23 @@ fun EditorScreen(
                 includeTail = eyeEnabled,
                 visibleWidthPx = visibleWidthPx,
                 visibleHeightPx = visibleHeightPx,
-                zoom = zoom
+                canvasZoom = canvasZoom
             )
         }
     }
 
-    // A zoom change re-derives the preview resolution (docs/effect_stack.md →
-    // Choosing preview resolution) and, past 100%, also drives a full-size
-    // composite swap. Keyed off the pure Compose transform so it never re-fires
-    // the stack effect above; debounced + best-latest so a fast pinch only
-    // triggers one render after the gesture settles, coalesced by the ViewModel.
+    // A canvasZoom change re-derives the preview resolution (docs/effect_stack.md →
+    // Choosing preview resolution) and, once the display outgrows the preview
+    // bitmap (displayScale > 1), also drives a full-size composite swap. Keyed
+    // off the pure Compose transform so it never re-fires the stack effect above;
+    // debounced + best-latest so a fast pinch only triggers one render after the
+    // gesture settles, coalesced by the ViewModel.
     @OptIn(FlowPreview::class)
     LaunchedEffect(Unit) {
-        snapshotFlow { viewportTransform.scale }
+        snapshotFlow { viewportTransform.canvasZoom }
             .drop(1)
             .debounce(300L)
-            .collectLatest { zoom ->
+            .collectLatest { canvasZoom ->
                 if (editBoxSize.width <= 0f) return@collectLatest
                 val visibleWidthPx = editBoxSize.width.toInt()
                 val visibleHeightPx = editBoxSize.height.toInt()
@@ -994,7 +1157,7 @@ if (isSourceSpaceTool(uiState.selectedTool, uiState.selectedBeautyTool)) {
                         excludeCurrentTool = excludeCurrentTool,
                         visibleWidthPx = visibleWidthPx,
                         visibleHeightPx = visibleHeightPx,
-                        zoom = zoom,
+                        canvasZoom = canvasZoom,
                         mosaicStrokesVersion = mosaicState.strokesVersion,
                         removalStrokesVersion = removalState.strokesVersion,
                         blurStrokesVersion = blurState.strokesVersion,
@@ -1006,7 +1169,7 @@ if (isSourceSpaceTool(uiState.selectedTool, uiState.selectedBeautyTool)) {
                         includeTail = eyeEnabled,
                         visibleWidthPx = visibleWidthPx,
                         visibleHeightPx = visibleHeightPx,
-                        zoom = zoom
+                        canvasZoom = canvasZoom
                     )
                 }
             }
@@ -1101,25 +1264,49 @@ if (isSourceSpaceTool(uiState.selectedTool, uiState.selectedBeautyTool)) {
  *
  *     Row { Column([canvasWidth] + [eyeRow]) · Column(≥ CANVAS_CONTROLS_MIN_WIDTH) { toolbar · scrollable [controls] } }
  *
+ * The caller ([canvasHeight] / [canvasWidth]) owns the letterbox-first split
+ * math ([portraitLetterboxSplit] / [landscapeLetterboxSplit]): the canvas takes
+ * its square cap → 50% floor → remainder and the tool controls absorb every dp
+ * the letterbox leaves unused (no percentage ceiling) — this workspace only
+ * allocates the computed sizes; the controls region is the split remainder, not
+ * the wrap-sized content. The panel's natural height (toolbar + tool controls
+ * content, wrap-sized) is still reported through [onControlsNaturallySized] for
+ * the scroll-fill threshold: content taller than the allocated remainder
+ * scrolls.
+ *
  * [canvasContentModifier] carries the sizing/clipping/gesture chain for the
  * canvas box (which differs per orientation: height-fixed in portrait,
  * width-fixed in landscape) and is applied after the size modifier so the
  * Box wrapper only ever sees the values the gestures already assumed.
  * The eye row always hugs the canvas bottom edge, never the side panel, and
- * keeps its own 56 dp × uiScale band (reserved before the controls minimum —
- * see [portraitCanvasHeight] / [landscapeCanvasWidth]).
+ * keeps its own 56 dp × uiScale band (excluded BEFORE the split — see
+ * [portraitLetterboxSplit] / [landscapeLetterboxSplit]).
  */
 @Composable
 internal fun EditorWorkspaceLayout(
     isLandscape: Boolean,
+    uiScale: Float,
     canvasHeight: Dp,
     canvasWidth: Dp,
+    onControlsNaturallySized: (Dp) -> Unit,
     canvasContentModifier: Modifier,
     canvasContent: @Composable BoxScope.() -> Unit,
     eyeRow: @Composable () -> Unit,
     controlsHeader: @Composable () -> Unit,
     controls: @Composable () -> Unit
 ) {
+    // The panel's natural (wrap-content) size is measured here — the header Box
+    // and the scroll-wrapped content box are both sized by their content — then
+    // reported up so the canvas can be sized from the CLAMPED panel (the panel
+    // region itself is just the remaining chrome after the canvas, so it can
+    // never outgrow the clamp the caller applied to the canvas).
+    val density = LocalDensity.current
+    var headerHeight by remember { mutableStateOf(0.dp) }
+    var controlsContentHeight by remember { mutableStateOf(0.dp) }
+    LaunchedEffect(headerHeight, controlsContentHeight) {
+        onControlsNaturallySized(headerHeight + controlsContentHeight)
+    }
+
     // Toolbar (pinned) over the active tool's scrollable panel. Lifted so the
     // exact same subtree is used inside the portrait column and the landscape
     // right-side panel.
@@ -1127,6 +1314,9 @@ internal fun EditorWorkspaceLayout(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
+                .onSizeChanged {
+                    headerHeight = with(density) { it.height.toDp() }
+                }
         ) {
             controlsHeader()
         }
@@ -1136,7 +1326,15 @@ internal fun EditorWorkspaceLayout(
                 .weight(1f)
                 .verticalScroll(rememberScrollState())
         ) {
-            controls()
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onSizeChanged {
+                        controlsContentHeight = with(density) { it.height.toDp() }
+                    }
+            ) {
+                controls()
+            }
         }
     }
 
@@ -1217,9 +1415,16 @@ internal fun buildStackSnapshot(
 ): List<StackEffect> {
     val list = mutableListOf<StackEffect>()
 
-    // Beauty: pulled straight from the single ordered effectStack (honouring
-    // user-chosen position, so `syncLayerState`'s orderedMerge preserves it).
-    list += uiState.effectStack.filterIsInstance<BeautyStackEffect>()
+    // Beauty: committed on lost focus from the LIVE params — the single source
+    // of truth (docs/effect_stack.md → Commit on lost focus, Beauty commit on
+    // lost focus). The params describe every sub-tool's current value, so a
+    // lost-focus commit stores exactly what the focused preview showed; the
+    // orderedMerge no-op guard drops the layer(s) when the values were reverted
+    // to their stored/default state, so a revert records no layer/checkpoint/
+    // dirty. [BeautyStackEffect]s are data classes, so the equality check inside
+    // syncLayerState ignores instance identity (the live fold derives FRESH
+    // instances from the same specs each commit).
+    list += uiState.beauty.buildBeautySpecs().toBeautyEffects()
 
     // Rotation/flip first, then the crop rect over the oriented image — both as
     // BASE steps (right after Beauty, before any adjustment/overlay), matching
@@ -1306,31 +1511,54 @@ internal fun buildStackSnapshot(
         } ?: uiState.effectStack.filterIsInstance<BackgroundEffect>().lastOrNull()
     if (backgroundEffect != null) list += backgroundEffect
 
-    // Brush / overlay layers carry their real content.
-    if (bundle.strokes.any { it.type == codes.pepper.whimsicalart.feature.editor.domain.StrokeType.PEN }) {
+    // Brush / overlay layers carry their real content. Each family is emitted
+    // from the bundle's live capture when present, ELSE from the last committed
+    // layer — the same self-sufficiency rule as the background above: a snapshot
+    // taken while a committed family's live strokes are momentarily empty (cold
+    // sub-VM, mid-zoom recompute, restore pending) must not drop the layer,
+    // otherwise syncLayerState's orderedMerge would delete it from the effectStack
+    // and the brush would vanish from the committed document and the full-size
+    // composite.
+    val penStrokes = bundle.strokes.filter { it.type == codes.pepper.whimsicalart.feature.editor.domain.StrokeType.PEN }
+    if (penStrokes.isNotEmpty()) {
         list += BitmapDiffEffect(
             tool = EditTool.PEN,
-            strokes = bundle.strokes.filter { it.type == codes.pepper.whimsicalart.feature.editor.domain.StrokeType.PEN }
+            strokes = penStrokes
         )
+    } else {
+        uiState.effectStack.filterIsInstance<BitmapDiffEffect>()
+            .lastOrNull { it.tool == EditTool.PEN }?.let { list += it }
     }
-    if (bundle.strokes.any { it.type == codes.pepper.whimsicalart.feature.editor.domain.StrokeType.MOSAIC }) {
+    val mosaicStrokes = bundle.strokes.filter { it.type == codes.pepper.whimsicalart.feature.editor.domain.StrokeType.MOSAIC }
+    if (mosaicStrokes.isNotEmpty()) {
         list += BitmapDiffEffect(
             tool = EditTool.MOSAIC,
-            strokes = bundle.strokes.filter { it.type == codes.pepper.whimsicalart.feature.editor.domain.StrokeType.MOSAIC },
+            strokes = mosaicStrokes,
             suggestedRegions = bundle.suggestedRegions
         )
+    } else {
+        uiState.effectStack.filterIsInstance<BitmapDiffEffect>()
+            .lastOrNull { it.tool == EditTool.MOSAIC }?.let { list += it }
     }
-    if (bundle.strokes.any { it.type == codes.pepper.whimsicalart.feature.editor.domain.StrokeType.BLUR }) {
+    val blurStrokes = bundle.strokes.filter { it.type == codes.pepper.whimsicalart.feature.editor.domain.StrokeType.BLUR }
+    if (blurStrokes.isNotEmpty()) {
         list += BitmapDiffEffect(
             tool = EditTool.BLUR_BRUSH,
-            strokes = bundle.strokes.filter { it.type == codes.pepper.whimsicalart.feature.editor.domain.StrokeType.BLUR }
+            strokes = blurStrokes
         )
+    } else {
+        uiState.effectStack.filterIsInstance<BitmapDiffEffect>()
+            .lastOrNull { it.tool == EditTool.BLUR_BRUSH }?.let { list += it }
     }
-    if (bundle.strokes.any { it.type == codes.pepper.whimsicalart.feature.editor.domain.StrokeType.REMOVAL }) {
+    val removalStrokes = bundle.strokes.filter { it.type == codes.pepper.whimsicalart.feature.editor.domain.StrokeType.REMOVAL }
+    if (removalStrokes.isNotEmpty()) {
         list += BitmapDiffEffect(
             tool = EditTool.OBJECT_REMOVAL,
-            strokes = bundle.strokes.filter { it.type == codes.pepper.whimsicalart.feature.editor.domain.StrokeType.REMOVAL }
+            strokes = removalStrokes
         )
+    } else {
+        uiState.effectStack.filterIsInstance<BitmapDiffEffect>()
+            .lastOrNull { it.tool == EditTool.OBJECT_REMOVAL }?.let { list += it }
     }
     if (bundle.stickers.isNotEmpty()) list += StickerEffect(layers = bundle.stickers)
     if (bundle.texts.isNotEmpty()) list += TextEffect(layers = bundle.texts)
@@ -1405,8 +1633,8 @@ internal fun BoxScope.PhotoBoundedLayer(
                 // square around the rotated canvas, so it does NOT follow rotation.
                 val flipsApplied = applyTransform && flipHorizontal
                 val flipvApplied = applyTransform && flipVertical
-                scaleX = transform.scale * if (flipsApplied) -1f else 1f
-                scaleY = transform.scale * if (flipvApplied) -1f else 1f
+                scaleX = transform.canvasZoom * if (flipsApplied) -1f else 1f
+                scaleY = transform.canvasZoom * if (flipvApplied) -1f else 1f
                 rotationZ = if (applyTransform) rotation else 0f
                 translationX = transform.offsetX
                 translationY = transform.offsetY
@@ -1825,52 +2053,131 @@ internal fun isNonPanZoomCapable(tool: EditTool?, beautyTool: BeautyTool?): Bool
 // so the eye row never comes out of the tool bar + controls minimum.
 internal val CANVAS_EYE_ROW_HEIGHT = 56.dp
 
-// Portrait: the canvas is letterboxed to min(available width, available height
-// − 56 dp × uiScale − 200 dp × uiScale) so the eye row and the bottom tool bar
-// + tool controls below ALWAYS keep their own (scaled) minimum vertical space
-// (see effects_reference "Canvas layout and gesture scope").
+// Portrait: the bottom tool bar + tool controls share ONE vertical budget with
+// the letterboxed canvas — the window below the top bar minus the eye row
+// (56 dp × uiScale), which is excluded BEFORE the split and never comes out of
+// the canvas/controls floors. The split is letterbox-first with two levels
+// (effects_reference "Canvas layout and gesture scope"): the canvas keeps its
+// square cap when the window affords it, otherwise its 50% floor. The controls
+// have NO percentage ceiling — they absorb every dp the letterbox leaves
+// unused. The 30% figure only bounds the CONTROLS MINIMUM in the last-resort
+// branch (structurally unreachable in portrait because 30% < 50%, reachable as
+// the landscape panel's 70% floor when the 600 dp reserve exceeds half the
+// window width).
 private val CANVAS_CONTROLS_MIN_HEIGHT = 200.dp
+internal const val PORTRAIT_CONTROLS_MIN_FRACTION = 0.30f
 
 // Landscape mirror rule (effects_reference "Canvas layout and gesture scope"):
-// the canvas box keeps min(available height − 56 dp × uiScale, available width
-// − 600 dp × uiScale) and the right controls panel therefore always keeps at
-// least 600 dp of width. The 56 dp × uiScale term is the eye row, so the square
-// cap equals the height the canvas already occupies (top bar down to the eye
-// row).
+// the right controls panel shares ONE horizontal budget with the letterboxed
+// canvas ([available width] split against [available height] − eye row). The
+// canvas keeps its square cap → 50% floor → below-floor; the panel absorbs the
+// remainder with no 70% ceiling. The 70% only bounds the PANEL MINIMUM in the
+// last-resort branch.
 internal val CANVAS_CONTROLS_MIN_WIDTH = 600.dp
+internal const val LANDSCAPE_PANEL_MIN_FRACTION = 0.70f
 
 /**
- * Portrait canvas height (spec-literal eye-row exclusion):
- * `min(availableWidth, availableHeight − eyeRow − controlsReserve)` with
- * `eyeRow = 56 dp × [uiScale]` and `controlsReserve = 200 dp × [uiScale]`.
- * The eye row is reserved FIRST, so the bottom tool bar + tool controls below
- * the canvas keep at least CANVAS_CONTROLS_MIN_HEIGHT × uiScale of height —
- * the eye row never comes out of that budget.
+ * The portrait letterbox-first split (effects_reference "Canvas layout and
+ * gesture scope"): one pair of eyes resolves BOTH the letterbox height and the
+ * tool-controls height from the shared vertical budget
+ * `availableHeight − 56 dp × uiScale` (the eye row is excluded BEFORE the split
+ * and never comes out of the two floors). The letterbox spans `availableWidth`
+ * and the split follows the two-level rule — square cap → 50% floor →
+ * controls-minimum/remainder — so the two values always sum to the budget and
+ * the controls have no percentage ceiling.
+ *
+ * @return (letterbox height, controls height).
  */
+@VisibleForTesting
+internal fun portraitLetterboxSplit(
+    availableWidth: Dp,
+    availableHeight: Dp,
+    uiScale: Float = 1f
+): Pair<Dp, Dp> {
+    val budget = (availableHeight - CANVAS_EYE_ROW_HEIGHT * uiScale).coerceAtLeast(0.dp)
+    val controlsMin = minOf(
+        CANVAS_CONTROLS_MIN_HEIGHT * uiScale,
+        budget * PORTRAIT_CONTROLS_MIN_FRACTION
+    )
+    val letterbox = when {
+        // Square cap: the window holds the square canvas plus the controls min.
+        budget >= availableWidth + controlsMin -> availableWidth
+        // 50% floor: the window holds both floors (always true in portrait —
+        // the controls min is capped at 30% of the budget).
+        budget >= budget * 0.5f + controlsMin -> budget * 0.5f
+        // Last resort: the controls keep their minimum and the letterbox the
+        // rest (below its floor only if the window cannot hold both floors).
+        else -> budget - controlsMin
+    }.coerceIn(0.dp, budget)
+    return letterbox to (budget - letterbox).coerceAtLeast(0.dp)
+}
+
+/** Portrait letterbox height for the shared canvas/controls budget. */
 @VisibleForTesting
 internal fun portraitCanvasHeight(
     availableWidth: Dp,
     availableHeight: Dp,
     uiScale: Float = 1f
-): Dp =
-    (minOf(
-        availableWidth,
-        availableHeight - CANVAS_EYE_ROW_HEIGHT * uiScale - CANVAS_CONTROLS_MIN_HEIGHT * uiScale
-    )).coerceAtLeast(0.dp)
+): Dp = portraitLetterboxSplit(availableWidth, availableHeight, uiScale).first
+
+/** Portrait tool-controls height — the split remainder past the letterbox. */
+@VisibleForTesting
+internal fun portraitControlsHeight(
+    availableWidth: Dp,
+    availableHeight: Dp,
+    uiScale: Float = 1f
+): Dp = portraitLetterboxSplit(availableWidth, availableHeight, uiScale).second
 
 /**
- * Landscape canvas width (spec-literal eye-row exclusion):
- * `min(availableHeight − eyeRow, availableWidth − 600 dp × [uiScale])`. The
- * square cap equals the height the canvas already occupies — the space between
- * the top bar and the eye row (56 dp × uiScale) — and the right controls panel
- * keeps at least CANVAS_CONTROLS_MIN_WIDTH × uiScale of width.
+ * The landscape letterbox-first split (effects_reference "Canvas layout and
+ * gesture scope"): one pair of eyes resolves BOTH the letterbox width and the
+ * right-panel width from the shared horizontal budget [availableWidth]. The
+ * letterbox height is the square cap `availableHeight − 56 dp × uiScale` and
+ * the split follows the two-level rule — square cap → 50% floor →
+ * panel-minimum/remainder — so both values sum to the window width and the
+ * panel has no percentage ceiling.
+ *
+ * @return (letterbox width, panel width).
  */
 @VisibleForTesting
-internal fun landscapeCanvasWidth(availableWidth: Dp, availableHeight: Dp, uiScale: Float = 1f): Dp =
-    (minOf(
-        availableHeight - CANVAS_EYE_ROW_HEIGHT * uiScale,
-        availableWidth - CANVAS_CONTROLS_MIN_WIDTH * uiScale
-    )).coerceAtLeast(0.dp)
+internal fun landscapeLetterboxSplit(
+    availableWidth: Dp,
+    availableHeight: Dp,
+    uiScale: Float = 1f
+): Pair<Dp, Dp> {
+    val h = (availableHeight - CANVAS_EYE_ROW_HEIGHT * uiScale).coerceAtLeast(0.dp)
+    val panelMin = minOf(
+        CANVAS_CONTROLS_MIN_WIDTH * uiScale,
+        availableWidth.coerceAtLeast(0.dp) * LANDSCAPE_PANEL_MIN_FRACTION
+    )
+    val letterbox = when {
+        // Square cap: the window (width) holds the square letterbox + the panel min.
+        availableWidth >= h + panelMin -> h
+        // 50% floor: the window holds both floors.
+        availableWidth >= availableWidth * 0.5f + panelMin -> availableWidth * 0.5f
+        // Last resort: the panel keeps its minimum and the letterbox the rest
+        // (below its floor — the reachable branch when the 600 dp panel reserve
+        // exceeds half the window width).
+        else -> availableWidth - panelMin
+    }.coerceIn(0.dp, availableWidth.coerceAtLeast(0.dp))
+    return letterbox to (availableWidth - letterbox).coerceAtLeast(0.dp)
+}
+
+/** Landscape letterbox width for the shared canvas/panel budget. */
+@VisibleForTesting
+internal fun landscapeCanvasWidth(
+    availableWidth: Dp,
+    availableHeight: Dp,
+    uiScale: Float = 1f
+): Dp = landscapeLetterboxSplit(availableWidth, availableHeight, uiScale).first
+
+/** Landscape right-panel width — the split remainder past the letterbox. */
+@VisibleForTesting
+internal fun landscapePanelWidth(
+    availableWidth: Dp,
+    availableHeight: Dp,
+    uiScale: Float = 1f
+): Dp = landscapeLetterboxSplit(availableWidth, availableHeight, uiScale).second
 
 /** Landscape when the visible area is wider than tall (split-screen/foldable safe). */
 internal fun isLandscapeLayout(availableWidth: Dp, availableHeight: Dp): Boolean =
@@ -1905,8 +2212,8 @@ internal fun isCompareTool(
 // strokes / mosaic tiles follow the base image while the user pans and zooms.
 internal fun Modifier.panZoomLayer(transform: ViewportTransform): Modifier =
     this.graphicsLayer {
-        scaleX = transform.scale
-        scaleY = transform.scale
+        scaleX = transform.canvasZoom
+        scaleY = transform.canvasZoom
         translationX = transform.offsetX
         translationY = transform.offsetY
     }
@@ -1998,6 +2305,19 @@ data class ImageCanvasFrame(
     }
 }
 
+/**
+ * The anchored capture/restore frame of one source-space family
+ * (docs/effect_stack.md → *Positional layers*): the frame is the family's
+ * committed PREFIX footprint fitted into the box (the rect the layer's real
+ * fold base would display at), and the full-size [refWidth]×[refHeight] are
+ * that footprint — the reference each captured fraction is stored against.
+ */
+internal data class FamilyAnchor(
+    val frame: ImageCanvasFrame,
+    val refWidth: Int,
+    val refHeight: Int
+)
+
 internal fun imageFrameOf(box: Size, image: Size): ImageCanvasFrame {
     val offX = if (box.width > 0f && image.width > 0f && box.width > image.width) {
         (box.width - image.width) / 2f
@@ -2013,6 +2333,82 @@ internal fun imageFrameOf(box: Size, image: Size): ImageCanvasFrame {
 }
 
 /**
+ * The [FamilyAnchor] (fitted frame + full-size reference dims) of [tool]'s
+ * family in [effects], against the stack's TRUE fold base [baseImageSize].
+ * [familyPrefixSize] folds the committed prefix — which already contains any
+ * Transform/Crop below the family — from that base, so the reference is the
+ * family's ACTUAL own-position base footprint, never the current viewport's
+ * (a pre-rotated `rotatedImageSize` would double-count the rotation already in
+ * the prefix). Pure so the reference-capture rule is unit-testable without the
+ * composable.
+ */
+internal fun familyAnchorFor(
+    effects: List<StackEffect>,
+    tool: EditTool,
+    baseImageSize: Size,
+    editBoxSize: Size
+): FamilyAnchor {
+    val prefix = familyPrefixSize(effects, tool, baseImageSize)
+    return FamilyAnchor(
+        frame = imageFrameOf(editBoxSize, fittedImageSize(editBoxSize, prefix)),
+        refWidth = prefix.width.roundToInt(),
+        refHeight = prefix.height.roundToInt()
+    )
+}
+
+/**
+ * The full-size footprint of the committed stack BEFORE the first [tool] layer
+ * (docs/effect_stack.md → *Positional layers*): the pixel base that tool's
+ * layer actually folds over. With no committed layer for [tool] (index −1) the
+ * new layer would append at the END of the stack, so its base is the whole
+ * committed stack. Computed with the pure size estimators — never a fold.
+ */
+internal fun familyPrefixSize(
+    effects: List<StackEffect>,
+    tool: EditTool,
+    base: Size
+): Size {
+    if (base.width <= 0f || base.height <= 0f) return Size.Zero
+    val idx = effects.indexOfFirst { it.tool == tool }
+    val prefix = if (idx < 0) effects else effects.take(idx)
+    val (w, h) = estimateStackOutputSize(prefix, base.width.roundToInt(), base.height.roundToInt())
+    return Size(w.toFloat(), h.toFloat())
+}
+
+/**
+ * The reference dims of a [FamilyAnchor] as a [GeometryAnchor].
+ */
+internal fun anchorOf(anchor: FamilyAnchor): GeometryAnchor =
+    GeometryAnchor(anchor.refWidth, anchor.refHeight)
+
+/**
+ * The anchored reference base carried by a committed positional layer — the
+ * reference of its FIRST item (every item of a family is captured against the
+ * same anchor). `0×0` when the layer has no items or was never anchored.
+ */
+internal fun storedRefOfStickers(layers: List<StickerItem>?): GeometryAnchor =
+    GeometryAnchor(
+        layers?.firstOrNull()?.referenceWidth ?: 0,
+        layers?.firstOrNull()?.referenceHeight ?: 0
+    )
+
+internal fun storedRefOfTexts(layers: List<TextItem>?): GeometryAnchor =
+    GeometryAnchor(
+        layers?.firstOrNull()?.referenceWidth ?: 0,
+        layers?.firstOrNull()?.referenceHeight ?: 0
+    )
+
+internal fun storedRefOfStrokes(layers: List<StrokeLayer>?): GeometryAnchor =
+    GeometryAnchor(
+        layers?.firstOrNull()?.referenceWidth ?: 0,
+        layers?.firstOrNull()?.referenceHeight ?: 0
+    )
+
+/** The committed stroke list of a brush [tool], or null when not in the stack. */
+private fun storedStrokes(effects: List<StackEffect>, tool: EditTool): List<StrokeLayer>? =
+    (effects.lastOrNull { it is BitmapDiffEffect && it.tool == tool } as? BitmapDiffEffect)?.strokes
+
+/**
  * The ContentScale.Fit size of [canvasSize] inside [box] (both in px): the
  * canvas scale is the smaller of the two axis ratios, mirroring exactly what
  * the editor's image/composite composable (and the crop grid's `fitRect`) show.
@@ -2025,9 +2421,13 @@ internal fun fittedImageSize(box: Size, canvasSize: Size): Size {
     ) {
         return Size.Zero
     }
-    val scale = (box.width / canvasSize.width)
+    // docs/effect_stack.md → Scale terms: `canvasFitScale` — a bitmap's
+    // on-screen side ÷ its own pixel side (the letterbox fit ratio, before any
+    // user zoom). Extracted as a named field (the preview/fold path shares the
+    // same formula via the planner).
+    val canvasFitScale = (box.width / canvasSize.width)
         .coerceAtMost(box.height / canvasSize.height)
-    return Size(canvasSize.width * scale, canvasSize.height * scale)
+    return Size(canvasSize.width * canvasFitScale, canvasSize.height * canvasFitScale)
 }
 
 /**

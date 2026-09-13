@@ -4,6 +4,7 @@ import androidx.annotation.DrawableRes
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import codes.pepper.whimsicalart.core.domain.UniformFit
 
 /** Default on-canvas size (dp) of a freshly picked emoji sticker. */
 const val EMOJI_STICKER_BASE_SIZE_DP = 150f
@@ -45,7 +46,18 @@ data class StickerItem(
      * Outline colour; null resolves to black at draw time
      * (the default line colour).
      */
-    val lineColor: Int? = null
+    val lineColor: Int? = null,
+    /**
+     * The anchored reference base of this sticker (docs/effect_stack.md →
+     * *Positional layers*): the full-size pixel dims of the image its
+     * [x]/[y]/[widthFrac]/[heightFrac] were captured against. The renderer maps
+     * the placement through the uniform fit of these dims into the running
+     * bitmap, so the sticker keeps its on-image spot and size when an earlier
+     * effect changes the base. `0×0` (default) keeps the un-anchored identity
+     * mapping.
+     */
+    val referenceWidth: Int = 0,
+    val referenceHeight: Int = 0
 )
 
 /**
@@ -62,7 +74,9 @@ fun StickerPlacement.toStickerItem(
     frameWidthPx: Float,
     frameHeightPx: Float,
     frameOffsetX: Float = 0f,
-    frameOffsetY: Float = 0f
+    frameOffsetY: Float = 0f,
+    referenceWidth: Int = 0,
+    referenceHeight: Int = 0
 ): StickerItem? {
     if (frameWidthPx <= 0f || frameHeightPx <= 0f || density.density <= 0f) return null
     val ratio = aspectRatio.takeIf { it.isFinite() && it > 0f } ?: 1f
@@ -96,7 +110,9 @@ fun StickerPlacement.toStickerItem(
         aspectRatio = ratio,
         lineStyle = lineStyle,
         lineThickness = lineThickness,
-        lineColor = lineColor
+        lineColor = lineColor,
+        referenceWidth = referenceWidth,
+        referenceHeight = referenceHeight
     )
 }
 
@@ -130,16 +146,39 @@ fun StickerItem.toStickerPlacement(
     frameHeightPx: Float,
     baseSize: Size,
     frameOffsetX: Float = 0f,
-    frameOffsetY: Float = 0f
+    frameOffsetY: Float = 0f,
+    referenceWidth: Int = 0,
+    referenceHeight: Int = 0
 ): StickerPlacement {
     val w = if (frameWidthPx > 0f) frameWidthPx else 1f
     val h = if (frameHeightPx > 0f) frameHeightPx else 1f
-    val wPx = widthFrac * w
-    val hPx = heightFrac * h
+    // With an anchored reference, the stored fractions are fractions of that
+    // reference, NOT of the current frame: they re-express through the uniform
+    // fit of the reference into the CURRENT frame (spec rule 5), so a restore
+    // lands the placement exactly where the committed render shows it even when
+    // the frame drifts from the reference. An unset reference keeps the legacy
+    // direct mapping (identity).
+    val anchored = referenceWidth > 0 && referenceHeight > 0
+    val wPx: Float
+    val hPx: Float
+    val xPx: Float
+    val yPx: Float
+    if (anchored) {
+        val fit = UniformFit.of(w.toInt(), h.toInt(), referenceWidth, referenceHeight)
+        wPx = fit.measureX(widthFrac, referenceWidth)
+        hPx = fit.measureY(heightFrac, referenceHeight)
+        xPx = fit.frameX(x, referenceWidth)
+        yPx = fit.frameY(y, referenceHeight)
+    } else {
+        wPx = widthFrac * w
+        hPx = heightFrac * h
+        xPx = x * w
+        yPx = y * h
+    }
     return StickerPlacement(
         stickerId = stickerId,
-        x = with(density) { (x * w + frameOffsetX).toDp().value },
-        y = with(density) { (y * h + frameOffsetY).toDp().value },
+        x = with(density) { (xPx + frameOffsetX).toDp().value },
+        y = with(density) { (yPx + frameOffsetY).toDp().value },
         scaleX = if (baseSize.width > 0f) with(density) { wPx.toDp().value } / baseSize.width else 1f,
         scaleY = if (baseSize.height > 0f) with(density) { hPx.toDp().value } / baseSize.height else 1f,
         rotation = rotationDegrees,

@@ -176,7 +176,7 @@ class FirstFullPreviewModelTest {
         // Rotating the app swaps device sides; the ceiling is the MAX side so it
         // must be stable. Zoom/viewport changes must not re-derive it either.
         viewModel.rotateLeft()
-        viewModel.setZoom(2f)
+        viewModel.setCanvasZoom(2f)
         viewModel.setViewBox(1200, 800)
         assertEquals("rotation must not regenerate the ceiling", baseline, viewModel.previewCeilingPx())
         assertEquals("zoom must not regenerate the ceiling", baseline, viewModel.previewCeilingPx())

@@ -33,6 +33,10 @@ class MosaicViewModel @Inject constructor(
 
     private var debounceJob: Job? = null
 
+    /** Whether the native face-rects runtime is initialisable; gates "Suggest faces". */
+    val faceDetectorAvailable: Boolean
+        get() = faceDetector.isAvailable
+
     fun updateBrushSize(size: Float) {
         _uiState.update { it.copy(brushSize = size) }
     }
@@ -54,6 +58,24 @@ class MosaicViewModel @Inject constructor(
                 currentStroke = null,
                 liveMosaicApplied = false,
                 strokesVersion = it.strokesVersion + (if (it.strokes.isNotEmpty()) 1 else 0)
+            )
+        }
+    }
+
+    /**
+     * Re-presents the committed strokes into the live state on tool re-entry,
+     * translated through the CURRENT anchored frame (docs/effect_stack.md →
+     * *Positional layers*): the committed fractions are mapped ref→frame by the
+     * same uniform fit the renderer uses, so a re-entered brush never rides stale
+     * screen positions after an earlier effect changed the layer's base.
+     */
+    fun restoreStrokes(strokes: List<MosaicStroke>) {
+        _uiState.update {
+            it.copy(
+                strokes = strokes,
+                currentStroke = null,
+                liveMosaicApplied = false,
+                strokesVersion = it.strokesVersion + 1
             )
         }
     }
@@ -128,6 +150,10 @@ class MosaicViewModel @Inject constructor(
 
     override fun onCleared() {
         debounceJob?.cancel()
+        // Exclusive with any in-flight detect: no new call starts and the native
+        // task is only released once the running detect drains — a freed LiteRT
+        // session mid-detect is a SIGSEGV (uncatchable), so teardown must never
+        // race an active suggestion.
         faceDetector.close()
     }
 

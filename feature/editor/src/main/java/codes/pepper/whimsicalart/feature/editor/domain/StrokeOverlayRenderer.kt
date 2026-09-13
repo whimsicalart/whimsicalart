@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
+import codes.pepper.whimsicalart.core.domain.UniformFit
 import codes.pepper.whimsicalart.feature.editor.domain.removal.DiffusionInpainter
 import kotlin.math.ceil
 import kotlin.math.roundToInt
@@ -42,10 +43,16 @@ internal object StrokeOverlayRenderer {
 
     internal fun drawStrokes(canvas: Bitmap, strokes: List<StrokeLayer>) {
         if (strokes.isEmpty()) return
+        val w = canvas.width
+        val h = canvas.height
         val regular = ArrayList<StrokeLayer>()
         val removals = ArrayList<StrokeLayer>()
         for (stroke in strokes) {
-            if (stroke.type == StrokeType.REMOVAL) removals.add(stroke) else regular.add(stroke)
+            // Every stroke first re-expresses its anchored geometry against the
+            // running bitmap through the uniform fit of its reference base
+            // (identity when unset), so the raster passes below are unchanged.
+            val mapped = stroke.anchoredTo(w, h)
+            if (mapped.type == StrokeType.REMOVAL) removals.add(mapped) else regular.add(mapped)
         }
         // One source snapshot shared by every mosaic stroke: drawing a pixel
         // mosaic needs the pre-mosaic pixels, and `applyPixelMosaic` used to
@@ -73,6 +80,29 @@ internal object StrokeOverlayRenderer {
         if (removals.isNotEmpty()) {
             applyRemoval(canvas, removals)
         }
+    }
+
+    /**
+     * Re-expresses an anchored stroke against a [w]×[h] destination through the
+     * uniform fit of its reference base (docs/effect_stack.md → *Positional
+     * layers*): reference-frame points — measured from the reference's own
+     * width/height — map to destination pixels via the fit, and the brush size
+     * (a width fraction) scales uniformly. The returned stroke is in PLAIN
+     * destination fractions (reference cleared), so every existing raster pass
+     * keeps its math byte-for-byte; an unanchored stroke is returned as-is.
+     */
+    private fun StrokeLayer.anchoredTo(w: Int, h: Int): StrokeLayer {
+        if (referenceWidth <= 0 || referenceHeight <= 0) return this
+        if (w <= 0 || h <= 0) return this
+        val fit = UniformFit.of(w, h, referenceWidth, referenceHeight)
+        return copy(
+            points = points.map { p ->
+                fit.frameX(p.first, referenceWidth) / w to fit.frameY(p.second, referenceHeight) / h
+            },
+            brushSize = (fit.measureX(brushSize, referenceWidth) / w),
+            referenceWidth = 0,
+            referenceHeight = 0
+        )
     }
 
     /**

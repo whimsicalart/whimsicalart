@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-13
+
 ### Added
 
 - Photo gallery with photo grid, multi-select, folder grouping, and MediaStore-based selection
@@ -34,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added (Release Tooling)
 
 - Release signing configured through gitignored `keystore.properties`, with automatic fallback to debug signing
-- Tagged release workflow (`.github/workflows/release.yml`) that builds, verifies, and publishes a signed APK on `v*` tags
+- Manually-triggered release workflow (`.github/workflows/release.yml`, via **Actions → Run workflow**) that resolves the version (explicit input, or last tag +1 patch, or `0.1.0` when none), builds, verifies, creates the tag + GitHub release with auto-generated notes, and uploads the signed APK
 - Version management and release automation documented in TODO.md
 
 ### Documentation

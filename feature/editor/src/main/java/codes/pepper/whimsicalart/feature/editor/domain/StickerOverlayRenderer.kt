@@ -9,6 +9,7 @@ import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
 import android.net.Uri
 import androidx.core.content.ContextCompat
+import codes.pepper.whimsicalart.core.domain.UniformFit
 import codes.pepper.whimsicalart.feature.stickers.domain.StickerItem
 import codes.pepper.whimsicalart.feature.stickers.domain.StickerLineStyle
 import codes.pepper.whimsicalart.feature.stickers.ui.DEFAULT_LINE_COLOUR
@@ -34,10 +35,18 @@ internal object StickerOverlayRenderer {
         val draw = android.graphics.Canvas(bitmap)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
         for (s in stickers) {
-            val w = (s.widthFrac * bitmap.width).roundToInt().coerceAtLeast(1)
-            val h = (s.heightFrac * bitmap.height).roundToInt().coerceAtLeast(1)
-            val cx = s.x * bitmap.width
-            val cy = s.y * bitmap.height
+            // An anchored sticker re-expresses its fractions through the uniform
+            // fit of its reference base into this bitmap (identity when the
+            // reference is unset or absent), so the box follows the running
+            // canvas and stays glued to its on-image spot when an earlier effect
+            // changes the base.
+            val refW = s.referenceWidth.takeIf { it > 0 } ?: bitmap.width
+            val refH = s.referenceHeight.takeIf { it > 0 } ?: bitmap.height
+            val fit = UniformFit.of(bitmap.width, bitmap.height, refW, refH)
+            val w = fit.measureX(s.widthFrac, refW).roundToInt().coerceAtLeast(1)
+            val h = fit.measureY(s.heightFrac, refH).roundToInt().coerceAtLeast(1)
+            val cx = fit.frameX(s.x, refW)
+            val cy = fit.frameY(s.y, refH)
             val left = cx - w / 2f
             val top = cy - h / 2f
             paint.alpha = (s.opacity * 255f).roundToInt().coerceIn(0, 255)

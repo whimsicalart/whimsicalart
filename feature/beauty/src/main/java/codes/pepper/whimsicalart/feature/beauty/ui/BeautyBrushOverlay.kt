@@ -12,6 +12,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import codes.pepper.whimsicalart.core.domain.UniformFit
 import codes.pepper.whimsicalart.feature.beauty.domain.BrushStroke
 import kotlin.math.min
 
@@ -50,17 +51,12 @@ fun BeautyBrushOverlay(
     ) {
         val maxWidth = constraints.maxWidth.toFloat()
         val maxHeight = constraints.maxHeight.toFloat()
-        val bitmapWidth = bitmapSize.width
-        val bitmapHeight = bitmapSize.height
-        val scale = min(maxWidth / bitmapWidth, maxHeight / bitmapHeight)
-        val drawWidth = bitmapWidth * scale
-        val drawHeight = bitmapHeight * scale
-        val offsetX = (maxWidth - drawWidth) / 2f
-        val offsetY = (maxHeight - drawHeight) / 2f
+        val bitmapWidth = bitmapSize.width.toInt()
+        val bitmapHeight = bitmapSize.height.toInt()
 
-        fun toBitmap(offset: Offset): PointF = PointF(
-            (offset.x - offsetX) / drawWidth,
-            (offset.y - offsetY) / drawHeight
+        fun toBitmap(offset: Offset, fit: UniformFit): PointF = PointF(
+            (offset.x - fit.offsetX) / fit.measureX(1f, bitmapWidth),
+            (offset.y - fit.offsetY) / fit.measureY(1f, bitmapHeight)
         )
 
         Canvas(
@@ -69,11 +65,16 @@ fun BeautyBrushOverlay(
                 .pointerInput(Unit) {
                     detectDragGestures(
                         onDragStart = { position ->
-                            onDragStart(toBitmap(position))
+                            // Captured against the SOURCE reference frame fitted
+                            // into the box (bitmapSize) — the same frame both the
+                            // committed bake and the draggable placement use.
+                            val fit = UniformFit.of(maxWidth.toInt(), maxHeight.toInt(), bitmapWidth, bitmapHeight)
+                            onDragStart(toBitmap(position, fit))
                         },
                         onDrag = { change, _ ->
                             change.consume()
-                            onDragMove(toBitmap(change.position))
+                            val fit = UniformFit.of(maxWidth.toInt(), maxHeight.toInt(), bitmapWidth, bitmapHeight)
+                            onDragMove(toBitmap(change.position, fit))
                         },
                         onDragEnd = { onDragEnd() },
                         onDragCancel = { onDragEnd() }
@@ -83,14 +84,21 @@ fun BeautyBrushOverlay(
             val all = activeStroke?.let { strokes + it } ?: strokes
             all.forEach { stroke ->
                 val opacity = stroke.opacity.coerceIn(0f, 1f)
-                val radius = (stroke.size * drawWidth / 2f).coerceAtLeast(1f)
+                // Anchored strokes re-express through the uniform fit of their
+                // reference into the box (docs/effect_stack.md → *Positional
+                // layers*); an unset reference fits against the source dims —
+                // the historical letterbox, preserved exactly.
+                val refW = stroke.referenceWidth.takeIf { it > 0 } ?: bitmapWidth
+                val refH = stroke.referenceHeight.takeIf { it > 0 } ?: bitmapHeight
+                val fit = UniformFit.of(maxWidth.toInt(), maxHeight.toInt(), refW, refH)
+                val radius = (fit.measureX(stroke.size, refW) / 2f).coerceAtLeast(1f)
                 stroke.points.forEach { point ->
                     drawCircle(
                         color = Color(color).copy(alpha = opacity),
                         radius = radius,
                         center = Offset(
-                            offsetX + point.x * drawWidth,
-                            offsetY + point.y * drawHeight
+                            fit.frameX(point.x, refW),
+                            fit.frameY(point.y, refH)
                         ),
                         blendMode = BlendMode.Plus
                     )

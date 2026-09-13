@@ -143,6 +143,28 @@ class PenViewModel @Inject constructor() : ViewModel() {
         }
     }
 
+    /**
+     * Re-presents the committed strokes into the ACTIVE layer's live state on
+     * tool re-entry, translated through the CURRENT anchored frame
+     * (docs/effect_stack.md → *Positional layers*): the committed fractions are
+     * mapped ref→frame by the same uniform fit the renderer uses, so a
+     * re-entered brush never rides stale screen positions after an earlier
+     * effect changed the layer's base.
+     */
+    fun restoreStrokes(strokes: List<PenStroke>) {
+        _uiState.update { state ->
+            val activeIndex = state.activeLayerIndex
+            val layer = state.layers.getOrNull(activeIndex) ?: return@update state
+            val layers = state.layers.toMutableList()
+            layers[activeIndex] = layer.copy(strokes = strokes)
+            state.copy(
+                layers = layers,
+                currentStroke = null,
+                strokesVersion = state.strokesVersion + 1
+            )
+        }
+    }
+
     fun undo() {
         _uiState.update { state ->
             val activeIndex = state.activeLayerIndex

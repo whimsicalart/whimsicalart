@@ -6,6 +6,7 @@ import android.graphics.Rect
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.unit.Density
+import codes.pepper.whimsicalart.feature.editor.domain.TextBackgroundShape
 import codes.pepper.whimsicalart.feature.editor.domain.TextOverlayRenderer
 import codes.pepper.whimsicalart.feature.editor.ui.fittedImageSize
 import codes.pepper.whimsicalart.feature.editor.ui.imageFrameOf
@@ -155,6 +156,76 @@ class TextPlacementParityTest {
         val expectedY = (130f - frame.offsetY) / frame.size.height * composite.height
         assertEquals("text ink x must sit on the projected composite pixel", expectedX, projectedCenter.first, 6f)
         assertEquals("text ink y must sit on the projected composite pixel", expectedY, projectedCenter.second, 6f)
+    }
+
+    // ---------------------------------------------------------------------
+    // MOVED-ITEM COMPOSITE PARITY (tracker: BUGFIX, a text layer COMMITS with
+    // the glyph TEXT at the wrong position once it has been MOVED). A moved item
+    // reuses its cached raster (position is not a cache key), but the COMMIT must
+    // composite that raster at the CURRENT centre — the old code drew it at the
+    // cached absolute left/top, pinning the text to its ORIGINAL position while
+    // the blur oval (repainted from the current centre) followed the move.
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `a moved item reuses the cached raster but composites on its new centre`() {
+        TextOverlayRenderer.clearTextCache()
+        val density = Density(1f)
+        val w = 1000f
+        val h = 800f
+        val fresh = { Bitmap.createBitmap(1000, 800, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLACK) } }
+
+        fun itemAt(position: Offset, scale: Float = 1f) = TextOverlay(
+            id = "t", text = "Hello", position = position,
+            fontSize = 24f, scale = scale, rotation = 15f,
+            backgroundShape = TextBackgroundShape.BLUR, backgroundBlur = 0.7f
+        ).toTextItem(density, w, h)
+
+        // Prime the block cache at the ORIGINAL centre (250, 200).
+        TextOverlayRenderer.drawTexts(context, fresh(), listOf(itemAt(Offset(250f, 200f))))
+        val rasters = TextOverlayRenderer.textRasterCount
+
+        // A pure MOVE (position + rotation, scale unchanged) is not a raster key
+        // — the block MUST hit the cache and composite on the new centre.
+        val moved = itemAt(Offset(700f, 550f), scale = 1f)
+        val composed = fresh()
+        TextOverlayRenderer.drawTexts(context, composed, listOf(moved))
+        assertEquals("a move must not re-rasterise the cached block", rasters, TextOverlayRenderer.textRasterCount)
+
+        // Both the rotate and the scale are about (cx, cy): whatever the shim
+        // does to the transform, the block's centre sits ON the item centre.
+        val ink = inkBoundingBox(composed)
+        val inkX = (ink.left + ink.right) / 2f
+        val inkY = (ink.top + ink.bottom) / 2f
+        val expectedX = moved.x * w
+        val expectedY = moved.y * h
+
+        assertEquals("text ink x sits on the NEW centre, not the raster position",
+            expectedX, inkX, 8f)
+        assertEquals("text ink y sits on the NEW centre, not the raster position",
+            expectedY, inkY, 8f)
+
+        // The blur cover (the shared scaled rule the committed oval paints) is
+        // centred on the SAME point — so the oval lands exactly under the moved
+        // text instead of drifting apart.
+        val cover = TextOverlayRenderer.scaledBlurCoverRect(context, moved, w, h)
+        assertEquals("blur cover centre x is the item centre", expectedX, cover.centerX(), 0.01f)
+        assertEquals("blur cover centre y is the item centre", expectedY, cover.centerY(), 0.01f)
+        assertEquals("blur cover centre x == text ink centre x", cover.centerX(), inkX, 8f)
+        assertEquals("blur cover centre y == text ink centre y", cover.centerY(), inkY, 8f)
+
+        // Guard: the move is genuinely far from the prime position, so a stale
+        // absolute composite could never satisfy the centre assertions above.
+        assertTrue("moved centre is far from the original raster centre",
+            abs(expectedX - 250f) + abs(expectedY - 200f) > 100f)
+
+        // A SCALE change is NOT part of that hit: the glyphs re-rasterise at the
+        // item's effective on-image size (Text is vector — grid-scaling re-renders
+        // the vector glyphs instead of bitmap-upscaling a base raster).
+        val rescaledRasters = TextOverlayRenderer.textRasterCount
+        TextOverlayRenderer.drawTexts(context, fresh(), listOf(itemAt(Offset(700f, 550f), scale = 1.6f)))
+        assertTrue("a scale change re-rasterises the vector block at the effective size",
+            TextOverlayRenderer.textRasterCount > rescaledRasters)
     }
 
     private fun inkBoundingBox(bmp: Bitmap): Rect {

@@ -1,5 +1,6 @@
 package codes.pepper.whimsicalart.feature.beauty.ui
 
+import android.graphics.Color
 import codes.pepper.whimsicalart.feature.beauty.domain.BrushStroke
 
 /**
@@ -32,7 +33,9 @@ data class BeautyParams(
     val lipstickColor: Int = MakeupPalette.colors.first(),
     val blushColor: Int = MakeupPalette.colors.first(),
     val eyeShadowColor: Int = MakeupPalette.colors.first(),
-    val eyelinerColor: Int = MakeupPalette.colors.first(),
+    // Eyeliner is the one makeup sub-tool whose never-picked default is black
+    // (all other colour-bearing sub-tools start on the first curated preset).
+    val eyelinerColor: Int = Color.BLACK,
     val foundationColor: Int = MakeupPalette.colors.first(),
     val hairColor: Int = MakeupPalette.colors.first(),
     val penColor: Int = MakeupPalette.colors.first(),

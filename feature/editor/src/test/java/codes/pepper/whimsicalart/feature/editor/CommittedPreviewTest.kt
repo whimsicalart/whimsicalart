@@ -9,6 +9,7 @@ import androidx.test.core.app.ApplicationProvider
 import codes.pepper.whimsicalart.feature.editor.domain.BackgroundEffect
 import codes.pepper.whimsicalart.feature.editor.domain.BackgroundLayer
 import codes.pepper.whimsicalart.feature.editor.domain.BackgroundMode
+import codes.pepper.whimsicalart.feature.editor.domain.CropEffect
 import codes.pepper.whimsicalart.feature.editor.domain.ImageSaver
 import codes.pepper.whimsicalart.feature.editor.domain.EditorRenderBundle
 import codes.pepper.whimsicalart.feature.editor.domain.FrameEffect
@@ -476,7 +477,7 @@ class CommittedPreviewTest {
             includeTail = false,
             visibleWidthPx = 200,
             visibleHeightPx = 200,
-            zoom = 1f
+            canvasZoom = 1f
         )
         // Nothing committed → no composite published, and no crash.
         assertNull(viewModel.uiState.value.compositePreview)
@@ -761,15 +762,15 @@ class CommittedPreviewTest {
         // transform (the "replacement does not follow the grid" device report).
         viewModel.refreshCompositePreview(
             bundleFor(transforms[0]), includeTail = true,
-            visibleWidthPx = 800, visibleHeightPx = 600, zoom = 1f
+            visibleWidthPx = 800, visibleHeightPx = 600, canvasZoom = 1f
         )
         viewModel.refreshCompositePreview(
             bundleFor(transforms[1]), includeTail = true,
-            visibleWidthPx = 800, visibleHeightPx = 600, zoom = 1f
+            visibleWidthPx = 800, visibleHeightPx = 600, canvasZoom = 1f
         )
         viewModel.refreshCompositePreview(
             bundleFor(transforms[2]), includeTail = true,
-            visibleWidthPx = 800, visibleHeightPx = 600, zoom = 1f
+            visibleWidthPx = 800, visibleHeightPx = 600, canvasZoom = 1f
         )
 
         val composite = waitForComposite(
@@ -811,7 +812,7 @@ class CommittedPreviewTest {
         )
         viewModel.refreshCompositePreview(
             bundle, includeTail = true,
-            visibleWidthPx = 800, visibleHeightPx = 600, zoom = 1f,
+            visibleWidthPx = 800, visibleHeightPx = 600, canvasZoom = 1f,
             mosaicStrokesVersion = 7
         )
 
@@ -849,6 +850,34 @@ class CommittedPreviewTest {
 
     // --- blur full-fold publish (BUG: Full-size brush blur vanishes on pinch-zoom) --
 
+    /** A 1920x1280 JPEG source (solid colour — only dims matter for scale tests). */
+    private fun largeSolidSource(name: String): File {
+        val file = File(context.cacheDir, name)
+        val src = Bitmap.createBitmap(1920, 1280, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) }
+        FileOutputStream(file).use { out -> src.compress(Bitmap.CompressFormat.JPEG, 100, out) }
+        src.recycle()
+        return file
+    }
+
+    /**
+     * Idles the main looper while re-firing [EditorViewModel.refreshLayerPreviews]
+     * until the row thumbnails for [keys] are all published. The rebuild is
+     * request-driven and the base decode lands asynchronously on first need, so a
+     * retry loop mirrors the production "re-visit the Layers window" fast-path.
+     */
+    private fun waitForLayerPreviews(vararg keys: String): Boolean {
+        val looper = shadowOf(Looper.getMainLooper())
+        val deadline = System.nanoTime() + 60_000_000_000L
+        while (System.nanoTime() < deadline) {
+            looper.idle()
+            val t = viewModel.uiState.value.layerThumbnails
+            if (t.isEmpty()) viewModel.refreshLayerPreviews()
+            if (keys.all { t.containsKey(it) }) return true
+            Thread.sleep(5)
+        }
+        return false
+    }
+
     /** An 1920x1280 JPEG whose left half is RED and right half GREEN (sharp edge at x=960). */
     private fun twoToneBlurSource(name: String): File {
         val file = File(context.cacheDir, name)
@@ -865,9 +894,11 @@ class CommittedPreviewTest {
 
     /**
      * Waits until a FULL-SIZE (composite == bounded source dims) composite is
-     * published. Full folds run ONLY past 100% zoom and are debounced, so this
-     * advances the Robolectric clock across [EditorViewModel.FULL_FOLD_DEBOUNCE_MS]
-     * while yielding real time for the Dispatchers.Default render threads.
+     * published. Full folds run ONLY when the display outgrows the preview
+     * bitmap (`displayScale` = `canvasFitScale` × `canvasZoom` > 1) and are
+     * debounced, so this advances the Robolectric clock across
+     * [EditorViewModel.FULL_FOLD_DEBOUNCE_MS] while yielding real time for the
+     * Dispatchers.Default render threads.
      */
     private fun waitForFullComposite(pristine: Bitmap): Bitmap? {
         ShadowLooper.idleMainLooper(1500, TimeUnit.MILLISECONDS)
@@ -902,14 +933,17 @@ class CommittedPreviewTest {
     @Test
     fun `pinching past 100 percent after a blur commit republishes a full composite with the blur`() {
         // BUG (Full-size brush blur vanishes on pinch-zoom): everything below
-        // happens past 100% zoom. Refresh #1 starts the preview fold and also
-        // schedules a full fold WITH the tool EXCLUDED (the composite base under
-        // the live blur overlay). The live-apply flip (excludeCurrentTool
-        // true→false) arrives as refresh #2/#3 while that preview fold is still
-        // running, so pre-fix #2/#3 early-returned and never re-issued the full
-        // fold — the stale NO-blur full fold then published itself as current
-        // AND stamped publishedBlurStrokesVersion (turning the overlay's
-        // showLiveResult on), so the committed blur vanished from the preview.
+        // happens past the displayScale-threshold (canvasFitScale ~0.78 for a
+        // 1920x1280 source in a 600x400 viewport, so displayScale > 1 starts
+        // around 130% canvasZoom; 1.5x fires it reliably). Refresh #1 starts the
+        // preview fold and also schedules a full fold WITH the tool EXCLUDED
+        // (the composite base under the live blur overlay). The live-apply flip
+        // (excludeCurrentTool true→false) arrives as refresh #2/#3 while that
+        // preview fold is still running, so pre-fix #2/#3 early-returned and
+        // never re-issued the full fold — the stale NO-blur full fold then
+        // published itself as current AND stamped publishedBlurStrokesVersion
+        // (turning the overlay's showLiveResult on), so the committed blur
+        // vanished from the preview.
         val file = twoToneBlurSource("blur_pinch_zoom.jpg")
         viewModel.setImageUri(Uri.fromFile(file))
         viewModel.setViewBox(600, 400)
@@ -920,20 +954,20 @@ class CommittedPreviewTest {
         // lands while the fold from #1 is still running (compositeRunning).
         viewModel.refreshCompositePreview(
             bundle, includeTail = true, excludeCurrentTool = true,
-            visibleWidthPx = 600, visibleHeightPx = 400, zoom = 1.2f, blurStrokesVersion = 3
+            visibleWidthPx = 600, visibleHeightPx = 400, canvasZoom = 1.5f, blurStrokesVersion = 3
         )
         viewModel.refreshCompositePreview(
             bundle, includeTail = true, excludeCurrentTool = true,
-            visibleWidthPx = 600, visibleHeightPx = 400, zoom = 1.2f, blurStrokesVersion = 3
+            visibleWidthPx = 600, visibleHeightPx = 400, canvasZoom = 1.5f, blurStrokesVersion = 3
         )
         viewModel.refreshCompositePreview(
             bundle, includeTail = true, excludeCurrentTool = false,
-            visibleWidthPx = 600, visibleHeightPx = 400, zoom = 1.2f, blurStrokesVersion = 3
+            visibleWidthPx = 600, visibleHeightPx = 400, canvasZoom = 1.5f, blurStrokesVersion = 3
         )
 
         val pristine = decodeBoundedOriented(context.contentResolver, Uri.fromFile(file))!!
         val composite = waitForFullComposite(pristine)
-        assertNotNull("a full-size composite is published past 100% zoom", composite)
+        assertNotNull("a full-size composite is published past the displayScale threshold", composite)
         // The published blur version equals the live strokes version here — the
         // value the overlay compares to decide showLiveResult — so the composite
         // MUST actually contain the strokes it claims to have folded.
@@ -959,17 +993,142 @@ class CommittedPreviewTest {
 
         viewModel.refreshCompositePreview(
             blurBundle(), includeTail = true, excludeCurrentTool = false,
-            visibleWidthPx = 600, visibleHeightPx = 400, zoom = 1.2f, blurStrokesVersion = 5
+            visibleWidthPx = 600, visibleHeightPx = 400, canvasZoom = 1.5f, blurStrokesVersion = 5
         )
 
         val pristine = decodeBoundedOriented(context.contentResolver, Uri.fromFile(file))!!
         val composite = waitForFullComposite(pristine)
-        assertNotNull("a full-size composite is published past 100% zoom", composite)
+        assertNotNull("a full-size composite is published past the displayScale threshold", composite)
         assertEquals(5, viewModel.uiState.value.publishedBlurStrokesVersion)
         assertTrue(
             "full composite folded the blur strokes",
             composite!!.getPixel(955, 640) != pristine.getPixel(955, 640)
         )
         pristine.recycle()
+    }
+
+    // --- per-layer preview scale pinned to previewSizeMaxSide (window-independent) ---
+
+    @Test
+    fun `per-layer committed previews are pinned to the session ceiling, not the viewport`() {
+        // BUG (per-layer previewScale pinned): the per-layer preview resolution was
+        // derived from the viewport, so a split-resize RE-DIMENSIONED and RE-FOLDED
+        // every committed preview. The pinned scale makes each layer's preview max
+        // side exactly the fixed preview ceiling — a pure function of the source
+        // footprint, never of the window — so a window resize is a NO-OP for the
+        // expensive per-layer cache (only canvasFitScale/displayScale move).
+        val file = largeSolidSource("per_layer_pinned_ceiling.jpg")
+        viewModel.setImageUri(Uri.fromFile(file))
+        viewModel.setViewBox(400, 300)
+        commit(
+            SingleAdjustmentEffect(tool = EditTool.BRIGHTNESS, value = 0.2f),
+            SingleAdjustmentEffect(tool = EditTool.CONTRAST, value = 0.3f)
+        )
+        val ceiling = viewModel.previewCeilingPx()
+        assertTrue(
+            "the layer previews publish at the session ceiling",
+            waitForLayerPreviews("layer:BRIGHTNESS", "layer:CONTRAST")
+        )
+
+        val stack = viewModel.uiState.value.effectStack
+        val p0 = stack[0].committedPreview
+        val p1 = stack[1].committedPreview
+        assertNotNull("layer 0 carries its committed preview", p0)
+        assertNotNull("layer 1 carries its committed preview", p1)
+        assertEquals("layer-0 max side == the fixed preview ceiling (not the 400 px viewport)", ceiling, maxOf(p0!!.width, p0.height))
+        assertEquals("layer-1 max side == the fixed preview ceiling (not the 400 px viewport)", ceiling, maxOf(p1!!.width, p1.height))
+
+        // Split-resize the window: the pinned chain must carry the SAME cached
+        // bitmaps — no re-dimension, no re-fold, no new allocation.
+        viewModel.setViewBox(1200, 900)
+        assertTrue(
+            "a window resize republishes the unchanged row thumbnails",
+            waitForLayerPreviews("layer:BRIGHTNESS", "layer:CONTRAST")
+        )
+        assertSame(
+            "a window resize carries the SAME layer-0 preview bitmap, no re-fold",
+            p0,
+            viewModel.uiState.value.effectStack[0].committedPreview
+        )
+        assertSame(
+            "a window resize carries the SAME layer-1 preview bitmap, no re-fold",
+            p1,
+            viewModel.uiState.value.effectStack[1].committedPreview
+        )
+    }
+
+    @Test
+    fun `a crop below the ceiling re-bases the crop and tail at their own larger pinned scale`() {
+        // BUG (per-layer previewScale pinned): after a crop shrinks the footprint
+        // below the ceiling, old code kept folding the tail at a stale per-window
+        // scale. The scale switch must RE-BASE the affected prefix: the crop layer
+        // (and the tail) are folded from a base at the crop's OWN pinned scale, so
+        // a 0.15x0.15 crop of a 1920x1280 source carries the TRUE 288x192 crop —
+        // never a ceiling-scaled 0.15 x ceiling = 48 px shard — while the untouched
+        // prefix stays at the ceiling.
+        val file = largeSolidSource("per_layer_crop_rebase.jpg")
+        viewModel.setImageUri(Uri.fromFile(file))
+        viewModel.setViewBox(400, 300)
+        commit(
+            SingleAdjustmentEffect(tool = EditTool.BRIGHTNESS, value = 0.2f),
+            CropEffect(rect = androidx.compose.ui.geometry.Rect(0f, 0f, 0.15f, 0.15f)),
+            SingleAdjustmentEffect(tool = EditTool.CONTRAST, value = 0.3f)
+        )
+        assertTrue(
+            "the crop and tail previews publish",
+            waitForLayerPreviews("layer:BRIGHTNESS", "layer:CROP", "layer:CONTRAST")
+        )
+
+        val stack = viewModel.uiState.value.effectStack
+        val p0 = stack[0].committedPreview
+        val p1 = stack[1].committedPreview
+        val p2 = stack[2].committedPreview
+        assertNotNull(p0)
+        assertNotNull(p1)
+        assertNotNull(p2)
+        assertEquals("prefix before the crop stays at the ceiling", viewModel.previewCeilingPx(), maxOf(p0!!.width, p0.height))
+        assertEquals("prefix before the crop keeps the source aspect ratio", (viewModel.previewCeilingPx() * 2 / 3), p0.height)
+        assertEquals("the crop layer re-bases to scale 1 → the TRUE full-res crop width", 288, p1!!.width)
+        assertEquals("the crop layer re-bases to scale 1 → the TRUE full-res crop height", 192, p1.height)
+        assertEquals("the tail keeps the re-based (true) footprint width", 288, p2!!.width)
+        assertEquals("the tail keeps the re-based (true) footprint height", 192, p2.height)
+    }
+
+    @Test
+    fun `the composite preview is pinned to the ceiling so a window only moves canvasFitScale`() {
+        // BUG (per-layer previewScale pinned): the interactive composite was
+        // dimensioned from the viewport, so rotating/split-resizing the window
+        // re-dimensioned (and re-folded) the preview to fit. The composite fold is
+        // now pinned to the SAME previewSizeMaxSide — a split window serves a 640
+        // px composite regardless of its own 200 px width, and only
+        // canvasFitScale (→ displayScale) follows the viewport.
+        val file = largeSolidSource("composite_pinned_ceiling.jpg")
+        viewModel.setImageUri(Uri.fromFile(file))
+        viewModel.setViewBox(400, 300)
+        commit(
+            SingleAdjustmentEffect(tool = EditTool.BRIGHTNESS, value = 0.2f),
+            SingleAdjustmentEffect(tool = EditTool.CONTRAST, value = 0.3f)
+        )
+        viewModel.refreshCompositePreview(
+            EditorRenderBundle(), includeTail = true,
+            visibleWidthPx = 400, visibleHeightPx = 300, canvasZoom = 1f
+        )
+        val ceiling = viewModel.previewCeilingPx()
+        val composite = waitForComposite(ceiling, (ceiling * 2 / 3))
+        assertNotNull("the composite is pinned to the session ceiling even in a small 400 px window", composite)
+        assertEquals(ceiling, composite!!.width)
+        assertEquals(ceiling * 2 / 3, composite.height)
+
+        // Split-resize to a tiny window: the pinned composite keeps its full
+        // resolution (no re-dimension / softness) — only canvasFitScale moves.
+        viewModel.setViewBox(200, 150)
+        viewModel.refreshCompositePreview(
+            EditorRenderBundle(), includeTail = true,
+            visibleWidthPx = 200, visibleHeightPx = 150, canvasZoom = 1f
+        )
+        val resized = waitForComposite(ceiling, (ceiling * 2 / 3))
+        assertNotNull("a split-resized window keeps the composite pinned at the ceiling", resized)
+        assertEquals("window resize does not re-dimension the composite width", ceiling, resized!!.width)
+        assertEquals("window resize does not re-dimension the composite height", ceiling * 2 / 3, resized.height)
     }
 }

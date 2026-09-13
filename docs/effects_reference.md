@@ -90,18 +90,22 @@ multi-window). The minimum is the smallest window where the editor fits
 differs per orientation, the anchor is **orientation-aware**:
 
 - **Portrait**: chrome = 64 top bar + 56 eye row + 200 controls reserve = 320
-  dp, plus a square letterbox whose side equals the width. With width 320 the
-  minimum is `320 wide × (320 + 320) = 640 tall`:
+  dp. The letterbox spans the width and keeps at least its **50% floor** (see
+  *Canvas layout and gesture scope* below); at the anchor it sits at its
+  **square cap — the full 320 dp width** (320 + 200 = 520 of the available
+  height; the floor's conditions only bind below the anchor). With width 320
+  the minimum is `320 wide × (320 chrome + 320 split) = 640 tall`:
   `uiScale = min(winWidth / 320.dp, winHeight / 640.dp).coerceIn(0.6f, 1.0f)`.
 - **Landscape**: chrome = 600 dp controls panel + 120 dp (64 top bar + 56 eye
-  row), plus a square letterbox. A 432 dp window height leaves a `432 − 120 =
-  312` dp letterbox, so the minimum is `912 wide (600 + 312) × 432 tall`:
+  row), plus a letterbox whose width can reach its square cap. A 432 dp window
+  height leaves a `432 − 120 = 312` dp square-cap letterbox, so the minimum is
+  `912 wide (600 + 312) × 432 tall`:
   `uiScale = min(winHeight / 432.dp, winWidth / 912.dp).coerceIn(0.6f, 1.0f)`.
 
 where `winWidth/winHeight` are the real available window sizes in dp (the same
 `min` over both axes, so a split — which halves **one** axis — always trips the
 scale: on a 437×972 dp device a half-height split gives `min(437/320, 486/640)
-≈ 0.76`, a half-width split `min(218.5/320, 972/640) ≈ 0.60`). Full-screen
+≈ 0.76`, a half-width split `min(218.5/320, 972/640) ≈ 0.68`). Full-screen
 windows meeting both anchors keep `uiScale = 1.0`; a window smaller than the
 anchors in either axis ramps smoothly down to a floor of `0.6` so Material
 touch targets stay usable.
@@ -119,23 +123,33 @@ mapping.
 with the **eye row**, the **bottom tool bar** and the **tool controls** beneath
 it:
 
-- **The canvas is a letterboxed area.** It spans the full available width and its
-  height is `min(available width, available chrome height − controls height)`, where
-  `available chrome height = available height − eye row` (the space below the app top bar minus
-  the fixed-height eye row under the canvas, `56 dp × uiScale`). Neither the eye row nor the
-  controls ever come out of the canvas' budget. The canvas is a perfect square **only in the
-  exact case where the width is the binding constraint**
-  (`availableWidth ≤ availableHeight − 56 dp × uiScale − controlsHeight`, typical portrait); when
-  the reduced remaining height binds instead the canvas is a **wide letterbox**. The image
-  is letterboxed (fit) inside that area, whatever its shape.
-- **The bottom tool bar + tool controls keep a `200 dp × uiScale` minimum height and never
-  exceed 30% of the available chrome height.** The controls' height is their natural content height
-  clamped into `[200 dp × uiScale, 30% × (available height − eye row)]`. The canvas takes the
-  remaining height up to its **square cap** (the available width); when the space left over after
-  the tools' minimum exceeds that cap, the canvas saturates at the cap and the **surplus is
-  handed to the controls**, which grow to absorb it — **but never past their 30% cap**: beyond
-  that the extra space stays with the canvas letterbox (its height is never shrunk below the
-  square cap by the controls).
+- **The canvas and the tool controls share one vertical budget.** The
+  `available area` is the window below the app top bar minus the fixed
+  `56 dp × uiScale` eye row: `available width` is the window width and
+  `available height` is the budget the letterbox and the controls split.
+  The letterbox spans the full `available width` and its height is chosen
+  **letterbox-first with two levels**; the controls take the remainder:
+  - letterbox **minimum** height = `50% × available height` (the floor);
+  - letterbox **maximum** height = `available width` (the portrait square cap);
+  - controls **minimum** height = `min(200 dp × uiScale, 30% × available height)`;
+  - controls **maximum** height = `available height − letterbox height`.
+
+  The sizing rule (in priority order):
+  - if `available height ≥ letterbox max + controls min` → the letterbox takes
+    its **square cap** and the controls fill the remainder
+    (`available height − letterbox height`, always ≥ their minimum);
+  - else if `available height ≥ letterbox min + controls min` → the letterbox
+    takes its **50% floor** and the controls fill the remainder;
+  - else → the controls take their **minimum** and the letterbox keeps the rest
+    (`available height − controls min`) — the only case where it falls below its
+    floor, since the window is too short to hold both floors at once.
+
+  The letterbox is therefore never squeezed below half the available height
+  while the window affords it, and the controls have **no percentage ceiling**:
+  they absorb every dp the letterbox leaves unused, up to the letterbox's floor.
+  (Concretely, a typical portrait phone gives the controls the full remainder
+  past the square canvas — roughly 35–50% of the available height — instead of
+  the earlier fixed 30% cap.)
 - **The eye row stays between the canvas and the tool bar.** The inspect label
   and its **eye button** sit directly under the canvas, above the bottom tool
   bar and the tool controls.
@@ -156,20 +170,31 @@ it:
 the tool controls move to a right-side panel**; the **eye row stays below the
 canvas**:
 
-- **The canvas is a letterboxed area on the left.** It fills the height from the
-  app top bar down to the eye row, and its width is
-  `min(available height − 56 dp × uiScale, visible app width − panel width)` — the mirror of
-  the portrait rule (the `56 dp × uiScale` term is the eye row, so the square cap equals the
-  height the canvas already occupies — the space between the top bar and the eye row). The
-  **right controls panel** therefore always keeps at least **`600 dp × uiScale`** of width and
-  never exceeds **70% of the visible window width** (the width is shared only between the panel
-  and the canvas letterbox, so the panel's available width is the whole window width): the
-  panel's width is its natural content width clamped into `[600 dp × uiScale, 70% × visible
-  app width]`. The canvas takes the remaining width up to that square cap, and when the
-  remaining width exceeds the cap the canvas stays at the cap and the panel **grows to absorb
-  the surplus** — **but never past its 70% cap**: beyond that the extra space stays with the
-  canvas letterbox (its width is never shrunk below the square cap by the panel). The image is
-  letterboxed (fit) inside that area, whatever its shape.
+- **The canvas and the right controls panel share one horizontal budget.** The
+  `available area` is the window below the app top bar: the letterbox occupies
+  the left with `available height` (window height − top bar − `56 dp × uiScale`
+  eye row), and the right panel spans `available height + eye row` (the full
+  column from the top bar to the window bottom). `available width` is the window
+  width the panel and the letterbox split, and the letterbox's width is chosen
+  **letterbox-first with two levels**; the panel takes the remainder:
+  - letterbox **minimum** width = `50% × available width` (the floor);
+  - letterbox **maximum** width = `available height` (the landscape square cap);
+  - controls **minimum** width = `min(600 dp × uiScale, 70% × available width)`;
+  - controls **maximum** width = `available width − letterbox width`.
+
+  The sizing rule (in priority order):
+  - if `available width ≥ letterbox max + controls min` → the letterbox takes
+    its **square cap** and the panel fills the remainder
+    (`available width − letterbox width`, always ≥ its minimum);
+  - else if `available width ≥ letterbox min + controls min` → the letterbox
+    takes its **50% floor** and the panel fills the remainder;
+  - else → the panel takes its **minimum** and the letterbox keeps the rest
+    (`available width − controls min`) — the only case where it falls below its
+    floor, since the window is too narrow to hold both floors at once.
+
+  The letterbox is therefore never squeezed below half the available width while
+  the window affords it, and the panel has **no percentage ceiling**: it absorbs
+  every dp the letterbox leaves unused, up to the letterbox's floor.
 - **The eye row sits below the canvas, exactly as in portrait** — the inspect
   label and its **eye button** hang under the left canvas area, never under the
   controls panel.
@@ -246,11 +271,11 @@ feedback (wrapped at 360°), so its canvas gesture is tool-owned like the others
 - `originalImage` is **never discarded** (including after a merge), so
   hold-to-compare always works once the eye is on.
 
-> **The one quirk (crop only).** Disabling the crop **eye** button **resets**
-> the viewport to the original position and scale. Every other Category B tool
-> **keeps** the changed pan/scale when its eye is disabled. Leaving a tool that
-> has an eye button resets the eye itself to its default state (on for Category
-> A, off for Category B).
+> **The one quirk (crop and transform).** Disabling the **eye** button on the
+> **crop** or **transform** tool **resets** the viewport to the original
+> position and scale. Every other Category B tool **keeps** the changed pan/scale
+> when its eye is disabled. Leaving a tool that has an eye button resets the eye
+> itself to its default state (on for Category A, off for Category B).
 
 ---
 
@@ -283,9 +308,9 @@ feedback (wrapped at 360°), so its canvas gesture is tool-owned like the others
   corner stretches both dimensions independently (unless an aspect ratio is
   selected).
 - **Eye button**: standard Category B behaviour (see *Two preview/compare
-  categories*); the crop-only quirk applies: disabling the crop eye **resets**
-  the viewport to the original position and scale (see the *one quirk* note
-  above).
+  categories*); the crop-and-transform quirk applies: disabling the crop eye
+  **resets** the viewport to the original position and scale (see the *one
+  quirk* note above).
 - **Hold-to-compare**: the standard Category B behaviour — not available in the
   normal editing state (a press-and-hold there reads as a frame drag/resize; the
   drag is owned by the crop frame), available only while the eye is enabled,
@@ -491,8 +516,7 @@ Background** is a hybrid (see its section below).
       placement (the same canvas-growth rule as Transform's free rotate), so the
       full scaled-up placement is emitted with the — now relatively smaller —
       canvas region. The user trims the final framing with
-      **Crop** afterwards. Scale-up resampling uses **lohalo interpolation**
-      (high-order, ringing-free Lanczos-class resampling).
+      **Crop** afterwards. Scale-up resampling uses **bilinear** filtering.
     - **Eye button (Category B behaviour)**: Eye OFF (the default placement
       state) → the canvas shows only the current effect based on the previous
       image (no tail folded); the placement grid and controls are visible and
@@ -618,7 +642,10 @@ Each sub-tool's **layer key**, **Layers-window label**, and **controls**:
 ### Brush / removal tools
 
 These are **normalized-stroke layers** (see `docs/effect_stack.md`, "Brush /
-pixel tools — normalized stroke layers"). Like every other **Category B**
+pixel tools — normalized stroke layers"). Their geometry uses the same
+**anchored reference base / centre-origin uniform fit** as the placement
+overlays (see `docs/effect_stack.md`, *Positional layers — anchored reference
+base, centre-origin, uniform fit*). Like every other **Category B**
 (non-pan/zoom-capable) tool, each has an **eye toggle (off by default)**: in the
 normal state the canvas holds still and a one-finger drag paints; with the **eye
 enabled** the canvas gains **both** pan/zoom **and** hold-to-compare; brushing
@@ -705,7 +732,7 @@ neon, rainbow; multi-layer + undo/redo) and add **colour opacity** and **hardnes
 **Business rule (all brush tools):** one-finger drags paint a stroke; the
 **eye** button suspends brushing and enables pan/zoom **and** hold-to-compare;
 on disabling the eye, brushing resumes from that point (the changed pan/scale is
-**kept** — the crop-only-quirk does not apply here). **Brush size adapts to the
+**kept** — the crop-and-transform quirk does not apply here). **Brush size adapts to the
 image scale**, and **already-brushed strokes follow pan/scale** as the preview
 moves (strokes stay glued to the image, not the screen). **Hold-to-compare** is
 **not available** while actually painting (a press there would hide the drawn
@@ -717,6 +744,10 @@ eye-enabled state like any other Category B tool.
 ### Decorative / placement overlays
 
 Placed overlays that draw into the running composite at their stack position.
+Their geometry is **anchored to the full-size base image each overlay was
+created against** and maps to any render through a **centre-origin uniform fit** —
+never a per-axis stretch — see `docs/effect_stack.md`, *Positional layers —
+anchored reference base, centre-origin, uniform fit*.
 
 ### Shared placement-overlay gestures
 
@@ -788,8 +819,8 @@ apply in any state where the tool's gestures are active. Their shared
   **tintable geometry** stickers — **heart, star, circle, square, triangle,
   flower, drop** — each with a **default fill colour** (heart → red, star → yellow, circle
   → blue, square → indigo, triangle → green, flower → pink, drop → cyan), and each taking any
-  other fill colour from the shared **fill colour** picker. The remaining categories (Nature, Animals,
-  Food, Objects, Decoration) show the bundled vector stickers. As the **last**
+  other fill colour from the shared **fill colour** picker. The remaining categories (Decoration,
+  Nature, Food, Animals, Objects) show the bundled vector stickers. As the **last**
   entry the picker offers a **Gallery** option: it launches the **phone's photo
   picker** (`PickVisualMedia`) so **any image from the device gallery** is picked
   and becomes a sticker, so a user's own photo/art can be placed just like a
@@ -945,6 +976,14 @@ apply in any state where the tool's gestures are active. Their shared
   legibly unreadable at moderate intensities. The oval is **soft at the borders
   — the blur fades outward**, mixing gradually into the surrounding image rather
   than ending in a hard edge, so the background never looks like a pasted disc.
+  The blurred region is **re-sampled live from the photo content currently
+  behind the text**: **any** control change that alters the item's footprint on
+  the image — font size, font family, alignment, content, position (pan),
+  scale (zoom), **rotation**, background intensity/shape — or a change to the
+  base image under it, **regenerates** the cached background against the item's
+  new footprint: the oval follows the text's current bounds and orientation and
+  always blurs the pixels actually behind it, never a stale sample from a
+  previous footprint or rotation.
 - **No colour/opacity controls when Blur is selected.** Because the blur
   background carries no colour, the shared *background colour* picker and the
   *background opacity* slider are **hidden** whenever the blur shape is active;
@@ -973,6 +1012,18 @@ apply in any state where the tool's gestures are active. Their shared
   reveals the image through the glyph cleanly with no outline showing inside the
   shape, for any blur intensity, matching the negative-mask result pixel-for-
   pixel at every opacity with no extra pass.
+- **The shadow is hollowed out of the glyph like the outline.** The shadow is
+  drawn **beneath** the glyph fill. When the font colour has **opacity below
+  100%**, the glyph fill shape is **cleared out of the shadow layer** — a
+  negative mask removing the font content exactly at the glyph position — so the
+  translucent glyph reveals the image behind it rather than the shadow showing
+  through it. The glyph content is then **re-applied on top** with its own
+  correct font colour and opacity whenever that opacity is **above 0%**. A fully
+  transparent fill (opacity `0%`) therefore shows the shadow only as an external
+  offset silhouette with a hollow at the glyph, and an opaque fill is unchanged.
+  The committed rasteriser (`BitmapRenderer.drawTexts`) and the live preview
+  (`TextOverlayLayer`) apply the same negative-mask pass used for the outline, so
+  preview and committed result match pixel-for-pixel.
 - **Text items are parameterised.** Every text — typed or recognized — is a
   `TextItem` parameter holding its full definition: content, colour (with
   opacity), font family, font size, alignment, position `(x, y)`, scale,

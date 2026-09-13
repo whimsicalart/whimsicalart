@@ -11,6 +11,7 @@ import android.graphics.RectF
 import android.graphics.Region
 import android.graphics.Shader
 import android.os.Build
+import codes.pepper.whimsicalart.core.domain.UniformFit
 import codes.pepper.whimsicalart.feature.beauty.detection.DetectedFace
 import codes.pepper.whimsicalart.feature.beauty.detection.FaceDetectionResult
 import kotlin.math.abs
@@ -278,12 +279,19 @@ open class BeautyProcessor {
         var scratch = IntArray(0)
 
         for (stroke in strokes) {
-            val radiusPx = (stroke.size * w / 2f).coerceAtLeast(1f)
+            // Anchored strokes re-express through the uniform fit of their
+            // reference base into the running bitmap (docs/effect_stack.md →
+            // *Positional layers*); an unset reference maps against the bitmap
+            // itself (identity), preserving the historical math.
+            val refW = stroke.referenceWidth.takeIf { it > 0 } ?: w
+            val refH = stroke.referenceHeight.takeIf { it > 0 } ?: h
+            val fit = UniformFit.of(w, h, refW, refH)
+            val radiusPx = (fit.measureX(stroke.size, refW) / 2f).coerceAtLeast(1f)
             val r = kotlin.math.ceil(radiusPx).toInt()
             val radiusSq = radiusPx * radiusPx
             for (point in stroke.points) {
-                val cx = (point.x * w).roundToInt()
-                val cy = (point.y * h).roundToInt()
+                val cx = fit.frameX(point.x, refW).roundToInt()
+                val cy = fit.frameY(point.y, refH).roundToInt()
                 val left = (cx - r).coerceAtLeast(0)
                 val top = (cy - r).coerceAtLeast(0)
                 val right = (cx + r).coerceAtMost(w - 1)

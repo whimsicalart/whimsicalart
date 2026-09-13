@@ -510,6 +510,62 @@ class StickerItemTest {
     }
 
     @Test
+    fun `transform added after a committed sticker does not re-anchor the sticker on re-entry`() {
+        // The sticker's prefix footprint (1200x800) fits the 900x600 box exactly
+        // (same 3:2 aspect), so capture and restore share frame 900x600 offset 0;
+        // the reference base stored is the full-size prefix footprint.
+        val sticker = StickerPresets.getStickerById("heart_1")!!
+        val density = Density(1f)
+        val placement = StickerPlacement(
+            stickerId = sticker.id, x = 225f, y = 150f, scaleX = 1f, scaleY = 1f
+        )
+        val item = placement.toStickerItem(sticker, density, 900f, 600f, 0f, 0f, 1200, 800)!!
+        assertEquals(1200, item.referenceWidth)
+        assertEquals(800, item.referenceHeight)
+        assertEquals(0.25f, item.x, 1e-4f)
+        assertEquals(0.25f, item.y, 1e-4f)
+
+        // A rotate committed AFTER the sticker leaves its prefix footprint and so
+        // the restore frame untouched — the re-entry must land the placement at
+        // the exact dp position (zero drift; the pre-fix code re-normalised
+        // against the post-transform composite frame and moved the sticker).
+        val restored = item.toStickerPlacement(
+            density, 900f, 600f, Size(sticker.width.toFloat(), sticker.height.toFloat()), 0f, 0f, 1200, 800
+        )
+        assertEquals(placement.x, restored.x, 0.001f)
+        assertEquals(placement.y, restored.y, 0.001f)
+
+        // Re-committing without further edits yields identical stack fractions.
+        val recommitted = restored.toStickerItem(sticker, density, 900f, 600f, 0f, 0f, 1200, 800)!!
+        assertEquals(item.x, recommitted.x, 1e-5f)
+        assertEquals(item.y, recommitted.y, 1e-5f)
+        assertEquals(item.widthFrac, recommitted.widthFrac, 1e-5f)
+        assertEquals(item.heightFrac, recommitted.heightFrac, 1e-5f)
+    }
+
+    @Test
+    fun `sticker captured on a 1200x800 base re-expresses into a swapped base keeping its on-image position`() {
+        // Simulates the sticker's prefix gaining a 90-degree rotate: the base
+        // becomes 800x1200, fitted into the same 900x600 box at scale 0.5 →
+        // 400x600 at offset (250, 0). The stored fractions belong to the 1200x800
+        // anchor and re-express through the uniform fit (scale 1/3 →
+        // centred on y at 166.67), NOT through the raw swapped-frame fraction.
+        val sticker = StickerPresets.getStickerById("heart_1")!!
+        val density = Density(1f)
+        val placement = StickerPlacement(
+            stickerId = sticker.id, x = 225f, y = 150f, scaleX = 1f, scaleY = 1f
+        )
+        val item = placement.toStickerItem(sticker, density, 900f, 600f, 0f, 0f, 1200, 800)!!
+
+        val restored = item.toStickerPlacement(
+            density, 400f, 600f, Size(sticker.width.toFloat(), sticker.height.toFloat()), 250f, 0f, 1200, 800
+        )
+        // x = frameX(0.25, 1200) + offset = 0.25*1200/3 + 250 = 350; y = 166.67 + 0.25*800/3 = 233.33.
+        assertEquals(350f, restored.x, 0.5f)
+        assertEquals(233.33f, restored.y, 0.5f)
+    }
+
+    @Test
     fun `sticker fraction is preserved across different fold target resolutions`() {
         val placement = StickerPlacement(
             stickerId = "emoji:🚀", x = 0.5f, y = 0.5f,

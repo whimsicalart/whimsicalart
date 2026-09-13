@@ -1,24 +1,33 @@
 package codes.pepper.whimsicalart.feature.editor.ui.text
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.RectF
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntSize
+import codes.pepper.whimsicalart.feature.editor.domain.TextAlignment
 import codes.pepper.whimsicalart.feature.editor.domain.TextBackgroundShape
+import codes.pepper.whimsicalart.feature.editor.domain.TextFont
 import codes.pepper.whimsicalart.feature.editor.domain.TextOverlayRenderer
+import codes.pepper.whimsicalart.feature.editor.domain.TextStyleFlag
 import codes.pepper.whimsicalart.feature.editor.domain.bokeh.BokehProcessor
 import codes.pepper.whimsicalart.feature.editor.domain.ocr.OcrOverlayFragment
 import codes.pepper.whimsicalart.feature.editor.ui.buildOcrTextOverlay
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import kotlin.math.abs
+
 
 /**
  * Spec: docs/effects_reference.md → *Text* → *Background blur semantics* — the
@@ -45,8 +54,28 @@ class TextBlurTest {
     private fun pixels(b: Bitmap): IntArray =
         IntArray(b.width * b.height).also { b.getPixels(it, 0, b.width, 0, 0, b.width, b.height) }
 
-    private fun blurWindow(source: Bitmap, sx: Int, sy: Int, rw: Int, rh: Int, inner: RectF, radius: Float, feather: Float): Bitmap =
-        TextOverlayRenderer.blurRegionOval(source, sx, sy, rw, rh, inner, radius, feather)
+    private fun blurWindow(
+        source: Bitmap,
+        sx: Int,
+        sy: Int,
+        rw: Int,
+        rh: Int,
+        inner: RectF,
+        radius: Float,
+        feather: Float,
+        rotationDegrees: Float = 0f
+    ): Bitmap =
+        TextOverlayRenderer.blurRegionOval(source, sx, sy, rw, rh, inner, radius, feather, rotationDegrees)
+
+    private fun argbPixels(b: Bitmap): IntArray =
+        IntArray(b.width * b.height).also { b.getPixels(it, 0, b.width, 0, 0, b.width, b.height) }
+
+    private fun luminance(argb: Int): Float {
+        val r = (argb shr 16) and 0xFF
+        val g = (argb shr 8) and 0xFF
+        val b = argb and 0xFF
+        return (r + g + b) / 3f
+    }
 
     @Test
     fun `blur core fully blurs inside the ellipse`() {
@@ -233,6 +262,31 @@ class TextBlurTest {
 
         assertEquals(TextBackgroundShape.BLUR, overlay.backgroundShape)
         assertEquals(0.65f, overlay.backgroundBlur, 1e-4f)
+    }
+
+    // ---------------------------------------------------------------------
+    // LIVE-source resolution (tracker: BUGFIX, the text tool's BLUR BACKGROUND
+    // NEVER SHOWS on the live preview canvas while editing). TextOverlayLayer
+    // builds the piece only when `sourceBitmap != null`; EditorCanvasArea fed it
+    // composite/sharpened previews, and on a PLAIN photo (no stack fold, no look
+    // effect) BOTH are null — so the live blur had no source and never rendered.
+    // The resolver now falls back to the oriented base decode the canvas shows.
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `live blur source resolves in display priority with a base-decode fallback`() {
+        val base = twoToneBitmap(100, 50)
+        val sharpened = twoToneBitmap(90, 45)
+        val composite = twoToneBitmap(80, 40)
+
+        assertEquals("stack fold shown -> the piece reads the composite",
+            composite, resolveLiveTextBlurSource(composite, sharpened, base))
+        assertEquals("no fold, look pass active -> the sharpened preview",
+            sharpened, resolveLiveTextBlurSource(null, sharpened, base))
+        assertEquals("PLAIN photo -> falls back to the oriented base decode (never null)",
+            base, resolveLiveTextBlurSource(null, null, base))
+        assertNull("all-null state stays null (nothing to blur)",
+            resolveLiveTextBlurSource(null, null, null))
     }
 
     // ---------------------------------------------------------------------
@@ -459,5 +513,217 @@ class TextBlurTest {
             windowW, liveW, 4f)
         assertEquals("live window height = the scaled cover + the feather band",
             windowH, liveH, 4f)
+    }
+
+    // ---------------------------------------------------------------------
+    // Live blur-piece CACHE invalidation (next.md → *BUGFIX, the live TEXT blur
+    // background is not invalidated when the text's rendering inputs change*).
+    // TextOverlayLayer's `remember` used to key on the compose box's `measured`
+    // size — every other change that re-lays-out into the SAME box (font family
+    // change, a style flag with equal line counts, a rewrap that keeps the block
+    // bounds) left all keys equal and the OLD pre-blurred window stayed on
+    // screen until an unrelated key moved. The cache now keys on the ACTUAL
+    // single-rule inputs via [textBlurPieceKey] — exactly the fields
+    // [TextOverlayRenderer.measureTextBlock] consumes — so a rebuild happens
+    // whenever the committed oval would recompute.
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `text blur cache key invalidates on any metrics field the old box-size proxy missed`() {
+        val base = TextOverlay(
+            id = "k",
+            text = "Blur",
+            position = Offset(50f, 25f),
+            backgroundShape = TextBackgroundShape.BLUR,
+            backgroundBlur = 0.6f
+        )
+        val baseKey = textBlurPieceKey(base)
+
+        // A metrics or geometry field the OLD key could not see (it keyed only
+        // on scale/position/backgroundBlur + the compose box's measured size).
+        // A font family or a style flag that keeps the SAME measured box must
+        // STILL invalidate — that is exactly the reported stale-window class.
+        val variants = listOf(
+            base.copy(fontFamily = TextFont.SERIF),
+            base.copy(style = setOf(TextStyleFlag.BOLD)),
+            base.copy(style = setOf(TextStyleFlag.UNDERLINE, TextStyleFlag.STRIKETHROUGH)),
+            base.copy(alignment = TextAlignment.JUSTIFIED),
+            base.copy(text = "Blurry"),
+            base.copy(fontSize = 40f),
+            base.copy(scale = 1.4f),
+            base.copy(position = Offset(60f, 30f)),
+            // Rotation changes which photo pixels the oval reads (the shared
+            // core re-samples under the rotated footprint) — it MUST rebuild.
+            base.copy(rotation = 45f),
+            base.copy(backgroundBlur = 0.9f)
+        )
+        variants.forEach { v ->
+            assertTrue(
+                "key must change for text=${v.text} family=${v.fontFamily} style=${v.style} " +
+                    "alignment=${v.alignment} fontSize=${v.fontSize} scale=${v.scale}",
+                baseKey != textBlurPieceKey(v)
+            )
+        }
+    }
+
+    @Test
+    fun `text blur cache key ignores edits the cover rule does not consume`() {
+        val base = TextOverlay(
+            id = "k",
+            text = "Blur",
+            position = Offset(50f, 25f),
+            backgroundShape = TextBackgroundShape.BLUR,
+            backgroundBlur = 0.6f
+        )
+        val baseKey = textBlurPieceKey(base)
+
+        // Shadow, outline and the background fill colour do NOT feed the cover rule
+        // (the blur piece only reads the photo behind the block) — these edits
+        // must skip the rebuild, mirroring the commit-side [TextItem] block key.
+        // Rotation is NOT here: it changes which photo pixels the oval blurs and
+        // MUST rebuild (covered above).
+        val isometries = listOf(
+            base.copy(hasShadow = true, shadowDistance = 8f, shadowAngle = 30f, shadowColor = Color.Red),
+            base.copy(hasOutline = true, outlineSize = 3f, outlineBlur = 1f, outlineColor = Color.Blue),
+            base.copy(backgroundColor = Color.White)
+        )
+        isometries.forEach { v -> assertEquals(baseKey, textBlurPieceKey(v)) }
+    }
+
+    @Test
+    fun `two overlays differing only in a metrics field build different blur windows`() {
+        val density = Density(density = 2f, fontScale = 1f)
+        val source = twoToneBitmap(500, 400)
+        val frame = TextBlurFrame(0f, 0f, 1000f, 800f)
+        val base = TextOverlay(
+            id = "w",
+            text = "Blur",
+            position = Offset(250f, 120f),
+            fontSize = 40f,
+            backgroundShape = TextBackgroundShape.BLUR,
+            backgroundBlur = 0.7f
+        )
+        // ONLY the font size differs — a metrics field the old key missed.
+        val edited = base.copy(fontSize = 60f)
+        assertTrue(
+            "metric-only change must invalidate the cache",
+            textBlurPieceKey(base) != textBlurPieceKey(edited)
+        )
+
+        // The rebuilt window re-derives from the CURRENT cover rule — the same
+        // scaledBlurCoverRect the committed rasteriser paints, so a bigger font
+        // covers a strictly larger rect.
+        val container: Context = ApplicationProvider.getApplicationContext()
+        val baseCover = TextOverlayRenderer.scaledBlurCoverRect(
+            container,
+            base.toTextItem(density, 1000f, 800f),
+            1000f,
+            800f
+        )
+        val editedCover = TextOverlayRenderer.scaledBlurCoverRect(
+            container,
+            edited.toTextItem(density, 1000f, 800f),
+            1000f,
+            800f
+        )
+        assertTrue(
+            "larger font covers a larger rect: base=${baseCover.width()} edited=${editedCover.width()}",
+            editedCover.width() > baseCover.width()
+        )
+
+        // A rebuild freshens, never reuses: the two pieces carry DIFFERENT
+        // source windows (the pre-blurred region scales with the cover).
+        val basePiece = requireNotNull(
+            buildTextBlurPiece(container, source, base, Size(340f, 110f), frame, density)
+        )
+        val editedPiece = requireNotNull(
+            buildTextBlurPiece(container, source, edited, Size(340f, 110f), frame, density)
+        )
+        assertTrue(
+            "rebuilt piece must differ from the stale one: base=${basePiece.src} edited=${editedPiece.src}",
+            basePiece.src != editedPiece.src
+        )
+    }
+
+    // ---------------------------------------------------------------------
+    // ROTATED-footprint re-sampling (next.md → *Text blur background keeps a
+    // stale cached sample when the item's footprint changes*). A rotated BLUR
+    // item must defocus the photo content under the ROTATED oval, never a
+    // rotated slice of the axis-aligned (pre-rotation) region. The shared core
+    // re-reads the source at the rotated coordinates whenever rotationDegrees is
+    // non-zero; these tests pin that down directly, and the cache-key tests
+    // above prove a rotation delta rebuilds the live piece.
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `blur core re-samples the photo under a rotated oval instead of spinning the window`() {
+        // Vertical two-tone boundary at x=50; the ellipse (center (50,30),
+        // rx=20, ry=15) straddles it. At 0° the patch holds the axis-aligned
+        // window (left/right halves split by the boundary). At 90° the same
+        // patch pixels must hold the photo content above/below the rectangle —
+        // the ellipse's TOP tip reads the BLACK zone and its BOTTOM tip the
+        // WHITE zone — i.e. the content follows the rotated footprint rather
+        // than a spun copy of the pre-rotation window.
+        val src = twoToneBitmap(100, 60)
+        val inner = RectF(30f, 15f, 70f, 45f)
+        val sx = 22
+        val sy = 7
+        val rw = 56
+        val rh = 46
+        val radius = 6f
+        val feather = 8f
+
+        val flat = blurWindow(src, sx, sy, rw, rh, inner, radius, feather, rotationDegrees = 0f)
+        val spun = blurWindow(src, sx, sy, rw, rh, inner, radius, feather, rotationDegrees = 90f)
+
+        // Patch position of the ellipse's top and bottom tips (world (50,15)
+        // and (50,45)).
+        val topX = 50 - sx
+        val topY = 15 - sy
+        val bottomX = 50 - sx
+        val bottomY = 45 - sy
+        val flatGap = abs(luminance(flat.getPixel(bottomX, bottomY)) - luminance(flat.getPixel(topX, topY)))
+        val spunTop = luminance(spun.getPixel(topX, topY))
+        val spunBottom = luminance(spun.getPixel(bottomX, bottomY))
+
+        assertTrue("90° top must be dark (black zone), got $spunTop", spunTop < 110)
+        assertTrue("90° bottom must be light (white zone), got $spunBottom", spunBottom > 150)
+        assertTrue("90° top/bottom diverge along the rotated content: top=$spunTop bottom=$spunBottom",
+            spunBottom - spunTop > 60f)
+        // At 0° both tips sit on the same boundary column, so they stay similar.
+        assertTrue("0° top/bottom both straddle the boundary column (gap=$flatGap)", flatGap < 40f)
+        // The 90° top tip re-read the far black zone, so it genuinely differs
+        // from the 0° boundary-grey sample at the same patch pixel.
+        assertTrue("90° content must differ from 0° at the top tip",
+            abs(spunTop - luminance(flat.getPixel(topX, topY))) > 20f)
+    }
+
+    @Test
+    fun `a rotation change rebuilds the live piece against the rotated footprint`() {
+        val density = Density(1f)
+        // Half-resolution preview (frame 1000×800 -> source 500×400). The item
+        // sits centred on the two-tone boundary at x=250, so rotating 90° flips
+        // which photo zones the oval reads.
+        val source = twoToneBitmap(500, 400)
+        val frame = TextBlurFrame(0f, 0f, 1000f, 800f)
+        val base = TextOverlay(
+            id = "r", text = "Blur", position = Offset(500f, 400f),
+            fontSize = 60f, backgroundShape = TextBackgroundShape.BLUR, backgroundBlur = 0.7f
+        )
+        val container: Context = ApplicationProvider.getApplicationContext()
+        val flat = requireNotNull(
+            buildTextBlurPiece(container, source, base, Size(340f, 110f), frame, density)
+        )
+        val rotated = requireNotNull(
+            buildTextBlurPiece(container, source, base.copy(rotation = 90f), Size(340f, 110f), frame, density)
+        )
+
+        // The window bounds are the UNROTATED scaled cover (same src rect); the
+        // rotation lives in the sampled CONTENT.
+        assertEquals(flat.src, rotated.src)
+        assertTrue("rotation must invalidate the live cache key",
+            textBlurPieceKey(base) != textBlurPieceKey(base.copy(rotation = 90f)))
+        assertFalse("rotated piece content must rebuild against the rotated footprint",
+            argbPixels(flat.bitmap).contentEquals(argbPixels(rotated.bitmap)))
     }
 }

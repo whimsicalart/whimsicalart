@@ -280,8 +280,8 @@ class EditorViewModel @Inject constructor(
     private var cleanBaseline: StackDocument = StackDocument(effectStack = emptyList())
 
     /**
-     * Fold-pipeline planning policy: preview resolution (viewport/zoom →
-     * [RenderPipelinePlanner.previewScaleFor]/[RenderPipelinePlanner.quantizedScale]),
+     * Fold-pipeline planning policy: preview resolution (viewport/canvasZoom →
+     * [RenderPipelinePlanner.previewScaleFor]/[RenderPipelinePlanner.quantizePreviewScale]),
      * the fold bases (`firstFull`/`firstPreview` + their scale-bucketed
      * downscales) and the memoized footprint estimate. Passive state + pure
      * math — the ViewModel keeps this class's full/preview [FoldImageCache]s and
@@ -363,7 +363,7 @@ class EditorViewModel @Inject constructor(
         val bundle: EditorRenderBundle,
         val includeTail: Boolean,
         val excludeCurrentTool: Boolean,
-        val zoom: Float,
+        val canvasZoom: Float,
         val mosaicStrokesVersion: Int = 0,
         val removalStrokesVersion: Int = 0,
         val blurStrokesVersion: Int = 0,
@@ -373,11 +373,12 @@ class EditorViewModel @Inject constructor(
     private var compositeRequest: CompositeRenderRequest? = null
 
     // The full-size background fold (docs/effect_stack.md → Performance / preview
-    // cache): scheduled only when zoomed past 100% (or a full-res result is
-    // needed), debounced so a pinch or slider drag doesn't spawn one fold per
-    // frame, and cancelled + re-issued whenever controls change mid-flight so it
-    // always restarts with the freshest values. Until it lands, the small
-    // preview-resolution composite keeps showing.
+    // cache): scheduled only when the display outgrows the preview bitmap
+    // (displayScale > 1) or a full-res result is needed, debounced so a pinch or
+    // slider drag doesn't spawn one fold per frame, and cancelled + re-issued
+    // whenever controls change mid-flight so it always restarts with the freshest
+    // values. Until it lands, the small preview-resolution composite keeps
+    // showing.
     private var fullFoldJob: Job? = null
 
     // Incremental fold cache — the designed 3-image model (see
@@ -404,11 +405,12 @@ class EditorViewModel @Inject constructor(
     // exist at TWO resolutions (docs/effect_stack.md → Performance / preview
     // cache):
     //  - PREVIEW resolution: the common path — used for the on-screen composite
-    //    while zoom ≤100% and as the stand-in while a full-size fold runs. Sized
-    //    to the visible pixel footprint (visibleDrawnPixels + margin), so it is a
-    //    small fraction of the full image.
-    //  - FULL resolution: computed only when the user zooms past 100% (or a zoom
-    //    is already set) or a full-res result (save / merge / share) is needed.
+    //    while displayScale ≤ 1 and as the stand-in while a full-size fold runs.
+    //    Sized to the visible pixel footprint (visibleDrawnPixels + margin), so
+    //    it is a small fraction of the full image.
+    //  - FULL resolution: computed only when the display outgrows the preview
+    //    bitmap (displayScale > 1) or a full-res result (save / merge / share) is
+    //    needed.
     //
     // Each cache entry is keyed by a fingerprint of the effect list that produced
     // it. If the current prefix still matches the cache's signature, a render
@@ -450,10 +452,11 @@ class EditorViewModel @Inject constructor(
     // incremental pass (each layer's preview is the previous layer's preview
     // folded with one more effect, reusing the shared beauty geometry context), so
     // it stays cheap. All entries are independent copies; evicted (and recycled)
-    // on fingerprint invalidation or when the preview scale bucket changes. The
-    // cache itself (bitmaps + fingerprints) lives in [LayerPreviewManager].
+    // on fingerprint invalidation or when a layer's own pinned preview scale
+    // changes (per-layer, via the cache's dims check — no single global scale
+    // bucket re-keys the whole cache). The cache itself (bitmaps + fingerprints)
+    // lives in [LayerPreviewManager].
     private val layerPreviewManager = LayerPreviewManager(::stackEffectFingerprint)
-    private var layerPreviewScaleBucket = -1f
     private var layerPreviewsJob: Job? = null
 
     // Viewing footprint + // preview resolution decision moved into [planner].
@@ -625,6 +628,9 @@ class EditorViewModel @Inject constructor(
             originalBitmap = original,
             editedBitmap = edited,
             baseImageSize = Size(edited.width.toFloat(), edited.height.toFloat()),
+            effectStack = emptyList(),
+            history = emptyList(),
+            historyIndex = -1,
             hasUnsavedChanges = false
         )
         cleanBaseline = StackDocument(effectStack = emptyList())
@@ -686,28 +692,50 @@ class EditorViewModel @Inject constructor(
     }
 
     /**
-     * Replaces the beauty sub-set of the single ordered [effectStack] (live
-     * streaming from the beauty UI). Unlike [upsertBeautyEffect]/[removeBeautyEffect]
-     * this does NOT push an undo entry per slider tick — drags update live and
-     * commit via the stack sync / a later gesture boundary — avoiding undo-history
-     * flooding. Each existing beauty layer is refreshed **in place** (its
-     * user-reordered position is preserved); layers turned off are dropped; newly
-     * active layers are appended; non-beauty layers keep their positions.
+     * Refreshes the LIVE beauty preview set (streaming from the beauty UI).
+     *
+     * **UNSTACKED while focused** (docs/effect_stack.md → Commit on lost focus:
+     * this is the BEAUTY tool's equivalent of the scaling slider / pen / sticker
+     * behaviour — see [codes.pepper.whimsicalart.feature.editor.ui.EditorScreen]):
+     * the live beauty params are the single source of truth and every fold
+     * derives the current beauty layers from them on the fly
+     * ([buildStackEffects] → [beautyEffectsForFold]), so this function NEVER
+     * writes into [EditorUiState.effectStack] and never pushes undo history.
+     * Unlike [upsertBeautyEffect]/[removeBeautyEffect]/[clearBeautyEffects]
+     * (committed mutations) there is no per-slider-tick undo entry — drags
+     * update live and the beauty sub-layers are committed exactly ONCE on lost
+     * focus via [syncLayerState], where the orderedMerge no-op guard drops a
+     * layer whose params were reverted to their stored/default value (no layer,
+     * no checkpoint, no dirty flag).
+     *
+     * The only live side effects here are the geometry ones: a geometry-changing
+     * beauty op (a reshape dimension) deforms the image, so the shared geometry
+     * context is marked stale and the background subject mask invalidated — a
+     * following beauty layer / the Background tool re-resolves against the
+     * changed deformation exactly as the committed path does.
      */
     fun setBeautyEffects(effects: List<BeautyStackEffect>) {
-        // Any geometry-changing beauty op (a reshape dimension) deforms the
-        // image: mark the shared geometry context stale so a following beauty
-        // layer regenerates.
         if (effects.any { it.changesGeometry }) geometryContext.markStale()
         if (effects.any { it.changesGeometry }) invalidateSubjectMask()
-        val before = _uiState.value
-        _uiState.update { it.copy(effectStack = mergeBeautyIntoStack(it.effectStack, effects)) }
-        stalenessForDerivedDelta(
-            buildStackEffects(before, EditorRenderBundle()),
-            buildStackEffects(_uiState.value, EditorRenderBundle())
-        )
         refreshPreviewLook()
     }
+
+    /**
+     * The beauty sub-set every LIVE fold runs over, in fold order (called by
+     * [buildStackEffects]): while the BEAUTY tool is focused (the editor is
+     * UNSTACKED) the layers are derived fresh from the params so the preview
+     * shows exactly what a lost-focus commit will store; otherwise the
+     * committed beauty sub-set of the effect stack is used. The payload is
+     * always re-positioned by [orderedMerge] against the stack, so a committed
+     * beauty layer's user-reordered position is preserved even in the
+     * focused/live branch.
+     */
+    private fun beautyEffectsForFold(state: EditorUiState): List<BeautyStackEffect> =
+        if (state.selectedTool == EditTool.BEAUTY) {
+            state.beauty.buildBeautySpecs().toBeautyEffects()
+        } else {
+            state.effectStack.filterIsInstance<BeautyStackEffect>()
+        }
 
     /**
      * Changes the selected beauty sub-tool (which control set the panel shows).
@@ -754,11 +782,21 @@ class EditorViewModel @Inject constructor(
     fun startBeautyPenStroke(position: PointF) {
         updateBeautyParams {
             val baseWidth = beautyPenBaseWidth()
+            val bmp = _uiState.value.originalBitmap
+            // The stroke anchored to the source frame it was captured against
+            // (docs/effect_stack.md → *Positional layers*): the LIVE overlay
+            // normalizes drag positions against the source dims, so the
+            // committed bake re-expresses them through the uniform fit of this
+            // reference into whichever base the pen layer folds over.
+            val refW = bmp?.width ?: 0
+            val refH = bmp?.height ?: 0
             it.copy(
                 activeStroke = BrushStroke(
                     points = mutableListOf(position),
                     size = it.brushSize / baseWidth,
-                    opacity = it.brushOpacity
+                    opacity = it.brushOpacity,
+                    referenceWidth = refW,
+                    referenceHeight = refH
                 )
             )
         }
@@ -804,43 +842,6 @@ class EditorViewModel @Inject constructor(
     private fun beautyPenBaseWidth(): Float {
         val bmp = _uiState.value.originalBitmap
         return bmp?.width?.toFloat() ?: DEFAULT_PEN_BASE_WIDTH
-    }
-
-    /**
-     * Derives one [BeautyLayerSpec] per active beauty sub-tool (in the fold order)
-     * from the editor-owned beauty parameters — the editor-side equivalent of the
-     * former `BeautyViewModel.activeSpecs()`. Geometry is resolved lazily by the
-     * shared geometry context at fold time, so specs carry no geometry.
-     */
-    private fun BeautyParams.buildBeautySpecs(): List<BeautyLayerSpec> {
-        val list = mutableListOf<BeautyLayerSpec>()
-        if (auto > 0f) list += BeautyLayerSpec("beauty:auto", auto)
-        if (smoothing > 0f) list += BeautyLayerSpec("beauty:smoothing", smoothing)
-        if (teeth > 0f) list += BeautyLayerSpec("beauty:teeth", teeth)
-        if (eyeBrighten > 0f) list += BeautyLayerSpec("beauty:eye_brighten", eyeBrighten)
-        if (darkCircle > 0f) list += BeautyLayerSpec("beauty:dark_circles", darkCircle)
-        if (spots > 0f) list += BeautyLayerSpec("beauty:spots", spots)
-        if (wrinkles > 0f) list += BeautyLayerSpec("beauty:wrinkles", wrinkles)
-        if (skinTone != 0f) list += BeautyLayerSpec("beauty:skin_tone", skinTone)
-        if (faceSlim != 0f) list += BeautyLayerSpec("beauty:slim", faceSlim)
-        if (eyeEnlarge != 0f) list += BeautyLayerSpec("beauty:eye_enlarge", eyeEnlarge)
-        if (nose != 0f) list += BeautyLayerSpec("beauty:nose", nose)
-        if (jaw != 0f) list += BeautyLayerSpec("beauty:jaw", jaw)
-        if (lipstick > 0f) list += BeautyLayerSpec("beauty:lipstick", lipstick, color = lipstickColor)
-        if (blush > 0f) list += BeautyLayerSpec("beauty:blush", blush, color = blushColor)
-        if (eyeShadow > 0f) list += BeautyLayerSpec("beauty:eye_shadow", eyeShadow, color = eyeShadowColor)
-        if (eyeliner > 0f) list += BeautyLayerSpec("beauty:eyeliner", eyeliner, color = eyelinerColor)
-        if (foundation > 0f) list += BeautyLayerSpec("beauty:foundation", foundation, color = foundationColor)
-        if (hair > 0f) list += BeautyLayerSpec("beauty:hair", hair, color = hairColor)
-        if (brushStrokes.isNotEmpty() || activeStroke != null) {
-            list += BeautyLayerSpec(
-                toolKey = "beauty:pen",
-                strokes = brushStrokes + listOfNotNull(activeStroke),
-                opacity = brushOpacity,
-                color = penColor
-            )
-        }
-        return list
     }
 
     /**
@@ -1752,7 +1753,22 @@ fun setStyleFilter(filter: StyleFilter?) {
         // AFTER so Redo restores the committed layer. An unchanged re-entry
         // (same merged stack) records nothing — revisiting an untouched tool
         // never floods the history.
-        val stackChanged = merged != current.effectStack
+        //
+        // "Actually changes" is decided semantically (per-layer fingerprints),
+        // never by instance identity: the lost-focus snapshot ALWAYS re-derives
+        // fresh effect instances with regenerated `id`s, so a structural
+        // `merged != current` would call every re-entry — even one whose values
+        // were reverted to the stored/default state — a change and push a
+        // no-op checkpoint plus a spurious dirty flag (docs/effect_stack.md →
+        // Beauty commit on lost focus: "revert ⇒ no layer, no checkpoint, no
+        // dirty"). The fingerprint excludes id/geometry/carried-preview, so it
+        // collapses exactly the no-actual-change re-entry (a parameter change of
+        // any magnitude still re-flips it).
+        val stackChanged = merged.size != current.effectStack.size ||
+            merged.withIndex().any { (i, ref) ->
+                val old = current.effectStack.getOrNull(i)
+                old == null || stackEffectFingerprint(old) != stackEffectFingerprint(ref)
+            }
         if (stackChanged) saveToHistory(HistoryKind.COARSE_GRAINED)
         // Prefix-contagious invalidation: the first layer whose parameters
         // changed invalidates every layer after it; unchanged layers keep their
@@ -1910,19 +1926,45 @@ fun setStyleFilter(filter: StyleFilter?) {
             val state = _uiState.value
             val stack = state.effectStack
             if (stack.isEmpty()) return@launch
-            val dims = estimateStackFootprint(stack) ?: return@launch
-            val scale = planner.previewScaleFor(dims.first, dims.second)
-            if (layerPreviewScaleBucket != scale) {
-                clearLayerPreviews()
-                layerPreviewScaleBucket = scale
+            // Per-layer pinned scales (docs/effect_stack.md → *Choosing preview
+            // resolution* + *Resolution glossary*): each layer i owns its OWN
+            // scale — `min(1, previewSizeMaxSide / estimatedOutputSize(prefix
+            // i).maxSide)` — so its committed preview's max side equals the fixed,
+            // orientation-invariant preview ceiling (capped at the prefix's own
+            // output when smaller; never an upscale). The prefix footprint is
+            // folded once per layer via each effect's size estimator (integer
+            // math only, no pixels). No viewport/zoom term: a window resize or a
+            // zoom change never re-dimensions or re-folds a preview, only
+            // [RenderPipelinePlanner.canvasFitScale] moves.
+            val startDims = stackStartDims() ?: return@launch
+            val prefixDims = ArrayList<Pair<Int, Int>>(stack.size)
+            var w = startDims.first
+            var h = startDims.second
+            for (effect in stack) {
+                val out = effect.estimateOutputSize(w, h)
+                prefixDims += out
+                w = out.first
+                h = out.second
             }
-            // The per-layer chain base: at preview resolution it is ALWAYS
-            // `firstPreview` bucketed to the scale — `firstFull` (the pristine
-            // decode, or the merged result after a merge) lohalo-downscaled to the
-            // preview ceiling — never a fresh decode of the full source, and never
-            // the resident `editedBitmap` directly.
-            val base = planner.cachedBaseDecode(scale) ?: return@launch
-            val (thumbs, fingerprints) = rebuildCommittedPreviews(stack = stack, scale = scale, base = base)
+            // The per-layer chain base at the FIRST layer's pinned scale: at
+            // preview resolution it is ALWAYS `firstPreview` bucketed to that
+            // scale — `firstFull` (the pristine decode, or the merged result
+            // after a merge) lohalo-downscaled to the preview ceiling — never a
+            // fresh decode of the full source, and never the resident
+            // `editedBitmap` directly. A scale switch mid-chain re-bases through
+            // [rebuildCommittedPreviews]; the first layer's own base seeds the
+            // chain start.
+            val firstDims = prefixDims[0]
+            val firstScale = planner.pinnedPreviewScale(firstDims.first, firstDims.second)
+            val base = planner.cachedBaseDecode(firstScale) ?: return@launch
+            val (thumbs, fingerprints) = rebuildCommittedPreviews(
+                stack = stack,
+                base = base,
+                computePrefixScale = { i ->
+                    val d = prefixDims[i]
+                    planner.pinnedPreviewScale(d.first, d.second)
+                }
+            )
             publishLayerPreviews(thumbs, fingerprints)
         }
     }
@@ -1947,6 +1989,13 @@ fun setStyleFilter(filter: StyleFilter?) {
      * — the field the next layer's fold resumes from, and the interactive
      * preview path folds from (docs/effect_stack.md → *Per-layer preview cache*).
      *
+     * These wrappers differ in the layer's preview scale: the fixed-[scale] form
+     * folds EVERY layer at the same scale (tests, and the sharpen stand-in path
+     * that has no prefix-varying geometry); the [computePrefixScale] form folds
+     * each layer at ITS OWN pinned scale (`min(1, previewSizeMaxSide /
+     * estimatedOutputSize(prefix i).maxSide)`), re-basing the chain on a scale
+     * switch ([LayerPreviewManager.rebuildCommittedPreviews]).
+     *
      * Runs the whole chain from [base]; the callers (commit / Layers-window open)
      * have already evicted the stale tail (prefix-contagious), so unchanged
      * prefixes short-circuit through the fingerprint fast-path and only the
@@ -1959,7 +2008,7 @@ fun setStyleFilter(filter: StyleFilter?) {
      * publishes one preview bitmap PER layerKey (resuming each from the previous
      * layer's carried preview), not a whole-stack composite — so no parallel
      * whole-stack fold exists here. Whole-stack composites (the editor preview,
-     * save / merge / zoom > 100%) all go through [renderCommittedBitmap] → the
+     * save / merge / displayScale > 1) all go through [renderCommittedBitmap] → the
      * controller; this builder is the documented layer-by-layer cache path that
      * keeps the two cache spaces (per-layer preview cache vs the controller's
      * 3-image full/preview cache) separate.
@@ -1973,15 +2022,64 @@ fun setStyleFilter(filter: StyleFilter?) {
     ): Pair<HashMap<String, Bitmap>, Map<String, String>> =
         layerPreviewManager.rebuildCommittedPreviews(
             stack = stack,
-            scale = scale,
             base = base,
-            renderLayerTail = { i, prevComposite ->
+            computePrefixScale = { scale },
+            renderLayerTail = { i, prevComposite, _ ->
                 renderStackWithBeautyGeometry(
                     context, base, stack.take(i + 1),
                     resumeAt = i, resumeBitmap = prevComposite,
                     adaptBackgroundArtifacts = scale < 1f,
                     scale = scale
                 )
+            }
+        )
+
+    /**
+     * The production per-layer form of the rebuild: every layer i folds at ITS
+     * OWN pinned preview scale, supplied via [computePrefixScale] (derived from
+     * the prefix's estimated output footprint). On a scale switch the chain
+     * re-bases — [renderLayerTail] is handed a `null` resume composite and folds
+     * the whole prefix from a base at the new scale (the manager's re-base
+     * contract), so each layer's committed preview keeps its own pinned max side
+     * while the steady-scale runs stay byte-identical and fully incremental.
+     */
+    internal suspend fun rebuildCommittedPreviews(
+        stack: List<StackEffect>,
+        base: Bitmap,
+        computePrefixScale: (Int) -> Float
+    ): Pair<HashMap<String, Bitmap>, Map<String, String>> =
+        layerPreviewManager.rebuildCommittedPreviews(
+            stack = stack,
+            base = base,
+            computePrefixScale = computePrefixScale,
+            renderLayerTail = { i, prevComposite, scale ->
+                when {
+                    // Steady-scale run: resume the fold from the carried preview
+                    // (the base argument is ignored for a live resume).
+                    prevComposite != null && !prevComposite.isRecycled ->
+                        renderStackWithBeautyGeometry(
+                            context, prevComposite, stack.take(i + 1),
+                            resumeAt = i, resumeBitmap = prevComposite,
+                            adaptBackgroundArtifacts = scale < 1f,
+                            scale = scale
+                        )
+                    // Scale switch (re-base): fold the whole prefix from a base
+                    // at the new scale. If the base cannot be resolved the layer
+                    // is left un-rendered (the manager skips the store).
+                    else -> {
+                        val foldBase = planner.foldBase(scale)
+                        if (foldBase == null) {
+                            null
+                        } else {
+                            renderStackWithBeautyGeometry(
+                                context, foldBase, stack.take(i + 1),
+                                resumeAt = i, resumeBitmap = null,
+                                adaptBackgroundArtifacts = scale < 1f,
+                                scale = scale
+                            )
+                        }
+                    }
+                }
             }
         )
 
@@ -2287,7 +2385,8 @@ fun setStyleFilter(filter: StyleFilter?) {
                             // The scale is the SAME 5%-bucket the composite fold
                             // uses (previewScaleFor), so the stand-in preview always
                             // stays within the fold's display resolution — at most
-                            // ~viewport × zoom, never the full 2048-bounded decode.
+                            // ~viewport × canvasZoom (previewScale is capped ≤ 1),
+                            // never the full 2048-bounded decode.
                             val dims = planner.sourceDims(_uiState.value.imageUri) ?: (it.width to it.height)
                             val scale = planner.previewScaleFor(dims.first, dims.second)
                             val previewW = (it.width * scale).roundToInt().coerceAtLeast(1)
@@ -2433,16 +2532,17 @@ fun setStyleFilter(filter: StyleFilter?) {
      * effects — not the pristine image — with the tool's own layer provided as the
      * interactive overlay.
      *
-     * [visibleWidthPx] / [visibleHeightPx] / [zoom] let the screen report the
+     * [visibleWidthPx] / [visibleHeightPx] / [canvasZoom] let the screen report the
      * viewing footprint; they drive the preview-resolution computation
      * (docs/effect_stack.md → Choosing preview resolution). The render always
      * starts with a PREVIEW-resolution fold (a small fraction of the source —
-     * fast, non-blocking); the full-size composite is computed only when zoomed
-     * past 100% (a debounced, cancellable background fold) or for a full-res
-     * result, and — once fresh — keeps being shown even if zoom later drops
-     * below 100%; the preview falls back to the small image only when the
-     * full-size result becomes stale. Callers are free to pass defaults and let
-     * the VM use its stored viewport/zoom state.
+     * fast, non-blocking); the full-size composite is computed only when the
+     * display outgrows the preview bitmap (`displayScale` > 1 — a debounced,
+     * cancellable background fold) or for a full-res result, and — once fresh —
+     * keeps being shown even if the zoom later drops below the threshold; the
+     * preview falls back to the small image only when the full-size result
+     * becomes stale. Callers are free to pass defaults and let the VM use its
+     * stored viewport/canvasZoom state.
      */
     fun refreshCompositePreview(
         bundle: EditorRenderBundle,
@@ -2450,7 +2550,7 @@ fun setStyleFilter(filter: StyleFilter?) {
         excludeCurrentTool: Boolean = false,
         visibleWidthPx: Int = planner.viewportWidthPx,
         visibleHeightPx: Int = planner.viewportHeightPx,
-        zoom: Float = planner.viewZoom,
+        canvasZoom: Float = planner.canvasZoom,
         mosaicStrokesVersion: Int = 0,
         removalStrokesVersion: Int = 0,
         blurStrokesVersion: Int = 0,
@@ -2468,14 +2568,14 @@ fun setStyleFilter(filter: StyleFilter?) {
         } else if (planner.viewportWidthPx <= 0 || planner.viewportHeightPx <= 0) {
             return
         }
-        planner.viewZoom = zoom.coerceIn(0.5f, 5f)
+        planner.canvasZoom = canvasZoom.coerceIn(0.5f, 5f)
         // Always record the LATEST request, even when a fold is already running
         // (that path only sets the dirty flag): the running loop re-reads it each
         // iteration, so a fast gesture stream (pan/scale/rotate/slider) converges
         // on the newest bundle instead of re-folding the one captured at launch
         // forever (the "placement image does not follow the grid" bug).
         compositeRequest = CompositeRenderRequest(
-            bundle, includeTail, excludeCurrentTool, zoom, mosaicStrokesVersion, removalStrokesVersion, blurStrokesVersion, penStrokesVersion
+            bundle, includeTail, excludeCurrentTool, canvasZoom, mosaicStrokesVersion, removalStrokesVersion, blurStrokesVersion, penStrokesVersion
         )
         compositeRequestSeq++
         if (compositeRunning) {
@@ -2490,11 +2590,25 @@ fun setStyleFilter(filter: StyleFilter?) {
                         val dims = estimateStackFootprint(
                             foldedEffects(request.bundle, request.includeTail, request.excludeCurrentTool)
                         ) ?: break
-                        val scale = planner.previewScaleFor(dims.first, dims.second)
+                        val previewScale = planner.pinnedPreviewScale(dims.first, dims.second)
+                        // Feed the planner the letterbox fit ratio of the pinned
+                        // composite it is about to fold — its on-screen letterbox
+                        // side ÷ its own pixel side. The composite footprint is now
+                        // window- AND zoom-INDEPENDENT (the pinned preview scale), so
+                        // this is a pure function of the current viewport: rotating /
+                        // split-resizing the window moves canvasFitScale (and with it
+                        // displayScale = canvasFitScale × canvasZoom — the full-size
+                        // threshold the fold gate keys on at the END of
+                        // refreshCompositePreview) WITHOUT re-folding or re-dimensioning
+                        // any preview image.
+                        planner.recomputeCanvasFitScale(
+                            (dims.first * previewScale).roundToInt(),
+                            (dims.second * previewScale).roundToInt()
+                        )
                         val rendered = try {
                             withContext(Dispatchers.Default) {
                                 renderCommittedBitmap(
-                                    request.bundle, request.includeTail, request.excludeCurrentTool, scale
+                                    request.bundle, request.includeTail, request.excludeCurrentTool, previewScale
                                 )
                             }
                         } catch (t: Throwable) {
@@ -2503,7 +2617,7 @@ fun setStyleFilter(filter: StyleFilter?) {
                             // stale, un-blurred composite on screen with no trace.
                             android.util.Log.w(
                                 "WhimsicalArt",
-                                "composite fold (scale=$scale, tail=${request.includeTail}, " +
+                                "composite fold (previewScale=$previewScale, tail=${request.includeTail}, " +
                                     "exclude=${request.excludeCurrentTool}) failed; keeping previous composite",
                                 t
                             )
@@ -2513,7 +2627,7 @@ fun setStyleFilter(filter: StyleFilter?) {
                             android.util.Log.w(
                                 "WhimsicalArt",
                                 "composite fold produced no bitmap " +
-                                    "(scale=$scale, tail=${request.includeTail}, exclude=${request.excludeCurrentTool})"
+                                    "(previewScale=$previewScale, tail=${request.includeTail}, exclude=${request.excludeCurrentTool})"
                             )
                         }
                         if (!isActive) break
@@ -2570,15 +2684,18 @@ fun setStyleFilter(filter: StyleFilter?) {
                 }
             }
         }
-        // Past 100% zoom: the preview stand-in was just shown; schedule the
-        // full-size fold (debounced + cancel-and-restart, so a fast pinch or
-        // slider drag coalesces into one fresh fold) unless a fresh full-size
-        // composite is already cached for these exact controls. Checked on EVERY
-        // refresh — including while the preview fold is still running — because
-        // a state change (e.g. the live-apply flip dropping the current tool from
-        // the exclusion) arriving mid-render used to early-return here and leave
-        // a stale full fold from the PREVIOUS controls to publish as "current".
-        if (planner.viewZoom > 1f && !isFullCompositeFresh(bundle, includeTail, excludeCurrentTool)) {
+        // When the DISPLAY outgrows the preview bitmap (displayScale > 1, not raw
+        // zoom-vs-fitted): schedule the full-size fold (debounced +
+        // cancel-and-restart, so a fast pinch or slider drag coalesces into one
+        // fresh fold) unless a fresh full-size composite is already cached for
+        // these exact controls. Checked on EVERY refresh — including while the
+        // preview fold is still running — because a state change (e.g. the
+        // live-apply flip dropping the current tool from the exclusion) arriving
+        // mid-render used to early-return here and leave a stale full fold from
+        // the PREVIOUS controls to publish as "current". While displayScale ≤ 1
+        // the preview bitmap merely upscales (its PREVIEW_MARGIN headroom), so
+        // no full fold is requested (docs/effect_stack.md → Zooming past 100%).
+        if (planner.displayScale > 1f && !isFullCompositeFresh(bundle, includeTail, excludeCurrentTool)) {
             requestFullFold(
                 bundle, includeTail, excludeCurrentTool, mosaicStrokesVersion, removalStrokesVersion, blurStrokesVersion, penStrokesVersion,
                 compositeRequestSeq
@@ -2624,7 +2741,7 @@ fun setStyleFilter(filter: StyleFilter?) {
 
     /** The fold cache key for a given effect list + resolution bucket. */
     private fun foldKey(effects: List<StackEffect>, scale: Float): String =
-        "${planner.quantizedScale(scale)}:" + effects.joinToString("|") { stackEffectFingerprint(it) }
+        "${planner.quantizePreviewScale(scale)}:" + effects.joinToString("|") { stackEffectFingerprint(it) }
 
     /** The key the full-size (scale 1) composite cache holds for these controls. */
     private fun fullSizeKey(bundle: EditorRenderBundle, excludeCurrentTool: Boolean): String =
@@ -2652,9 +2769,10 @@ fun setStyleFilter(filter: StyleFilter?) {
     }
     /**
      * The composite to show right now: a fresh full-size fold when one is cached
-     * for the current controls (once computed it stays in use even below 100%
-     * zoom — it is strictly sharper than the preview), otherwise the small
-     * preview-resolution fold just produced. Always an INDEPENDENT copy.
+     * for the current controls (once computed it stays in use even when
+     * displayScale drops back ≤ 1 — it is strictly sharper than the preview),
+     * otherwise the small preview-resolution fold just produced. Always an
+     * INDEPENDENT copy.
      */
     private fun displayBitmap(
         preview: Bitmap,
@@ -2692,11 +2810,31 @@ fun setStyleFilter(filter: StyleFilter?) {
         fullFoldJob = viewModelScope.launch {
             delay(FULL_FOLD_DEBOUNCE_MS)
             if (!isActive) return@launch
+            // Never SWALLOW a full-size fold failure silently — that is how the
+            // device-only background render used to leave the canvas stuck on the
+            // preview composite with no trace. Signal the failure and keep the
+            // last good composite (the best available image) on screen: the
+            // user can still save/export it, and the re-render path (any later
+            // refresh) will retry the fold.
             val full = runCatching {
                 withContext(Dispatchers.Default) {
                     renderCommittedBitmap(bundle, includeTail, excludeCurrentTool, 1f)
                 }
-            }.getOrNull()
+            }.getOrElse { t ->
+                // A failed full-size fold must NEVER be silent — otherwise the
+                // canvas parks on the preview image with no trace (the
+                // "text/stickers never appear full-size" report: the background
+                // replace/blur fold threw at full resolution and the old
+                // runCatching swallowed it). Keep the preview, but surface the
+                // throwable just like the preview path does.
+                android.util.Log.w(
+                    "WhimsicalArt",
+                    "full-size fold (tail=$includeTail, exclude=$excludeCurrentTool) failed; " +
+                        "staying on the preview resolution image",
+                    t
+                )
+                null
+            }
             // Publish only the fold of the LATEST controls. A newer refresh (e.g.
             // the live-apply flip moved excludeCurrentTool true→false while this
             // fold was mid-flight) has rescheduled a newer fold; publishing THIS
@@ -2724,6 +2862,12 @@ fun setStyleFilter(filter: StyleFilter?) {
                         }
                     )
                 }
+            } else if (full == null) {
+                android.util.Log.w(
+                    "WhimsicalArt",
+                    "full-size fold produced no bitmap " +
+                        "(tail=$includeTail, exclude=$excludeCurrentTool); staying on preview"
+                )
             }
         }
     }
@@ -2883,7 +3027,7 @@ fun setStyleFilter(filter: StyleFilter?) {
      * Centralized full-size controller and fold-to-index): folds the committed
      * [effects] up to [targetCount] effects — **index 0 = NO effect** (the base
      * itself) — at the requested [scale] (preview vs full). Every full-size
-     * requester (save, merge, zoom > 100%) and the whole-stack composite fold
+     * requester (save, merge, displayScale > 1) and the whole-stack composite fold
      * route through here so the caches populate, refresh and invalidate in one
      * consistent way.
      *
@@ -2933,7 +3077,7 @@ fun setStyleFilter(filter: StyleFilter?) {
         }
         val target = targetCount.coerceIn(1, effects.size)
         val cache = if (scale >= 1f) cacheStore.fullCache else cacheStore.previewCache
-        val bucketKey = planner.quantizedScale(scale)
+        val bucketKey = planner.quantizePreviewScale(scale)
         fun prefixSig(count: Int): String =
             "$bucketKey:" + effects.take(count).joinToString("|") { stackEffectFingerprint(it) }
         val prevCount = (effects.size - 1).coerceAtLeast(0)
@@ -3151,7 +3295,7 @@ fun setStyleFilter(filter: StyleFilter?) {
         // circuits before reaching here); the trim keeps naive callers sane.
         val target = targetCount.coerceIn(1, effects.size)
         val idx = toolIndex.coerceIn(0, effects.size)
-        val bucketKey = planner.quantizedScale(scale)
+        val bucketKey = planner.quantizePreviewScale(scale)
         fun prefixSig(count: Int): String =
             "$bucketKey:" + effects.take(count).joinToString("|") { stackEffectFingerprint(it) }
         val fullTarget = target == effects.size
@@ -3437,7 +3581,7 @@ fun setStyleFilter(filter: StyleFilter?) {
         scale: Float
     ): Bitmap? {
         geometryTrackBaseCallsForTest++
-        val bucket = planner.quantizedScale(scale)
+        val bucket = planner.quantizePreviewScale(scale)
         val key = "$bucket:" + geomEffects.joinToString("|") { stackEffectFingerprint(it) }
         synchronized(geometryTrackLock) {
             geometryTrackCache[key]?.takeUnless(Bitmap::isRecycled)?.let { return it }
@@ -3448,7 +3592,7 @@ fun setStyleFilter(filter: StyleFilter?) {
         val renderable = if (last is BeautyStackEffect) {
             // The resolver's ML-input reference is the base's OWN pixel count
             // when the base is already at/under the ML cap (every preview base
-            // and every capped committed/zoom>100% base — the geometry-track
+            // and every capped committed/displayScale>1 base — the geometry-track
             // cap in [geometryTrackScaleFor]): ML then runs the FULL base, so
             // the preview and the capped full-quality passes detect at the same
             // input resolution. Only a full-size base above the cap (the merge
@@ -3517,7 +3661,7 @@ fun setStyleFilter(filter: StyleFilter?) {
             val e = effects[i]
             if (e is BeautyStackEffect) {
                 val geomEffects = effects.take(i).filter { it.changesGeometry }
-                // The FULL-SIZE (committed / zoom>100% / save) fold runs at the
+                // The FULL-SIZE (committed / displayScale>1 / save) fold runs at the
                 // geometry-track scale ([geometryTrackScaleFor]) — a multi-MP
                 // footprint folds inside the adaptive 1–4 MP ML budget instead
                 // of at full size, so no full-size deformation intermediate is
@@ -3752,12 +3896,21 @@ fun setStyleFilter(filter: StyleFilter?) {
 
     /** Memoized estimated composite footprint for the current fold list (see the planner). */
     private fun estimateStackFootprint(effects: List<StackEffect>): Pair<Int, Int>? =
-        planner.estimateStackFootprint(effects) {
-            val state = _uiState.value
-            state.editedBitmap?.takeIf { state.hasMerged && !it.isRecycled }
-                ?.let { it.width to it.height }
-                ?: planner.sourceDims(_uiState.value.imageUri)
-        }
+        planner.estimateStackFootprint(effects, ::stackStartDims)
+
+    /**
+     * The fold chain's START footprint: the merged result after a Merge Layers
+     * commit, otherwise the EXIF-oriented source decode dims (bounds only — no
+     * pixel decode, see [RenderPipelinePlanner.sourceDims]). Both the whole-stack
+     * footprint estimate and the per-layer prefix scales fold their effects from
+     * this base.
+     */
+    private fun stackStartDims(): Pair<Int, Int>? {
+        val state = _uiState.value
+        return state.editedBitmap?.takeIf { state.hasMerged && !it.isRecycled }
+            ?.let { it.width to it.height }
+            ?: planner.sourceDims(state.imageUri)
+    }
 
     /**
      * Tracks the on-screen canvas size (px) so the preview-resolution computation
@@ -3771,12 +3924,16 @@ fun setStyleFilter(filter: StyleFilter?) {
     internal fun currentViewportPx(): Pair<Int, Int> =
         planner.viewportWidthPx to planner.viewportHeightPx
 
-    /** Tracks the display zoom so a >100% zoom triggers a full-size fold. */
-    fun setZoom(zoom: Float) {
-        planner.setZoom(zoom)
+    /**
+     * Tracks the display canvasZoom so a full-size fold is triggered only when
+     * the display outgrows the preview bitmap (displayScale > 1), never on a
+     * zoom-vs-fitted basis.
+     */
+    fun setCanvasZoom(canvasZoom: Float) {
+        planner.setCanvasZoom(canvasZoom)
     }
 
-    /** The preview-resolution scale for the current viewport/zoom (see the planner). */
+    /** The preview-resolution scale for the current viewport/canvasZoom (see the planner). */
     internal fun previewScaleFor(sourceWidth: Int, sourceHeight: Int): Float =
         planner.previewScaleFor(sourceWidth, sourceHeight)
 
@@ -3840,10 +3997,12 @@ fun setStyleFilter(filter: StyleFilter?) {
         bundle: EditorRenderBundle
     ): List<StackEffect> {
         val list = mutableListOf<StackEffect>()
-        // Beauty: pulled straight from the single ordered effectStack (so its
-        // user-chosen position is honoured). Because beauty is in the derived
-        // list, orderedMerge below refreshes and preserves it in place.
-        list += state.effectStack.filterIsInstance<BeautyStackEffect>()
+        // Beauty: the UNSTACKED live sub-set while the BEAUTY tool is focused
+        // (derived fresh from the params so the preview shows exactly what a
+        // lost-focus commit will store), the committed sub-set otherwise. Because
+        // beauty is in the derived list, orderedMerge below refreshes and
+        // preserves each layer's user-chosen position in place.
+        list += beautyEffectsForFold(state)
         if (state.rotation != 0f || state.flipHorizontal || state.flipVertical) {
             list += TransformEffect(
                 rotation = state.rotation,
@@ -3920,33 +4079,69 @@ fun setStyleFilter(filter: StyleFilter?) {
                 )
             } ?: state.effectStack.filterIsInstance<BackgroundEffect>().lastOrNull()
         if (backgroundEffect != null) list += backgroundEffect
-        if (bundle.strokes.any { it.type == StrokeType.PEN }) {
-            list += BitmapDiffEffect(
-                tool = EditTool.PEN,
-                strokes = bundle.strokes.filter { it.type == StrokeType.PEN }
-            )
+        // Brush layers follow the same self-sufficiency rule as the background:
+        // a committed BitmapDiffEffect IS the document state, while bundle.strokes
+        // is a TRANSIENT capture of the live sub-VM strokes. Those live strokes
+        // can be momentarily empty for a committed family — a cold/restored
+        // sub-VM on tool re-entry, a sub-VM recreated while the stack survives,
+        // or a mid-zoom recompute — and the folder must NEVER drop the committed
+        // layer because of that (the "brush not applied on the full-size /
+        // zoomed composite shows the original" report). So each family falls back
+        // to the last committed layer whenever the live capture carries no
+        // strokes of that type; without it, orderedMerge would delete the layer
+        // from the fold and effectStack and the brush would vanish only in the
+        // full-size fold (the preview hides the gap because it resumes from the
+        // layer's CARRIED committedPreview baked at commit time).
+        val penStrokes = bundle.strokes.filter { it.type == StrokeType.PEN }
+        if (penStrokes.isNotEmpty()) {
+            list += BitmapDiffEffect(tool = EditTool.PEN, strokes = penStrokes)
+        } else {
+            state.effectStack.filterIsInstance<BitmapDiffEffect>()
+                .lastOrNull { it.tool == EditTool.PEN }?.let { list += it }
         }
-        if (bundle.strokes.any { it.type == StrokeType.MOSAIC }) {
+        val mosaicStrokes = bundle.strokes.filter { it.type == StrokeType.MOSAIC }
+        if (mosaicStrokes.isNotEmpty()) {
             list += BitmapDiffEffect(
                 tool = EditTool.MOSAIC,
-                strokes = bundle.strokes.filter { it.type == StrokeType.MOSAIC },
+                strokes = mosaicStrokes,
                 suggestedRegions = bundle.suggestedRegions
             )
+        } else {
+            state.effectStack.filterIsInstance<BitmapDiffEffect>()
+                .lastOrNull { it.tool == EditTool.MOSAIC }?.let { list += it }
         }
-        if (bundle.strokes.any { it.type == StrokeType.BLUR }) {
-            list += BitmapDiffEffect(
-                tool = EditTool.BLUR_BRUSH,
-                strokes = bundle.strokes.filter { it.type == StrokeType.BLUR }
-            )
+        val blurStrokes = bundle.strokes.filter { it.type == StrokeType.BLUR }
+        if (blurStrokes.isNotEmpty()) {
+            list += BitmapDiffEffect(tool = EditTool.BLUR_BRUSH, strokes = blurStrokes)
+        } else {
+            state.effectStack.filterIsInstance<BitmapDiffEffect>()
+                .lastOrNull { it.tool == EditTool.BLUR_BRUSH }?.let { list += it }
         }
-        if (bundle.strokes.any { it.type == StrokeType.REMOVAL }) {
-            list += BitmapDiffEffect(
-                tool = EditTool.OBJECT_REMOVAL,
-                strokes = bundle.strokes.filter { it.type == StrokeType.REMOVAL }
-            )
+        val removalStrokes = bundle.strokes.filter { it.type == StrokeType.REMOVAL }
+        if (removalStrokes.isNotEmpty()) {
+            list += BitmapDiffEffect(tool = EditTool.OBJECT_REMOVAL, strokes = removalStrokes)
+        } else {
+            state.effectStack.filterIsInstance<BitmapDiffEffect>()
+                .lastOrNull { it.tool == EditTool.OBJECT_REMOVAL }?.let { list += it }
         }
-        if (bundle.stickers.isNotEmpty()) list += StickerEffect(layers = bundle.stickers)
-        if (bundle.texts.isNotEmpty()) list += TextEffect(layers = bundle.texts)
+        if (bundle.stickers.isNotEmpty()) {
+            list += StickerEffect(layers = bundle.stickers)
+        } else {
+            // Committed stickers follow the same self-sufficiency rule as the
+            // background and the brushes: `bundle.stickers` is a TRANSIENT
+            // capture of the live placement tool; after a commit (or a reload /
+            // re-entry with the tool inactive) the fold runs WITHOUT that
+            // capture and must fall back to the last committed StickerEffect.
+            // Without it the full-size fold silently drops the layer and the
+            // canvas stays on the preview ("text/sticker layers never appear in
+            // the full-size composite" report).
+            state.effectStack.filterIsInstance<StickerEffect>().lastOrNull()?.let { list += it }
+        }
+        if (bundle.texts.isNotEmpty()) {
+            list += TextEffect(layers = bundle.texts)
+        } else {
+            state.effectStack.filterIsInstance<TextEffect>().lastOrNull()?.let { list += it }
+        }
         bundle.frames.firstOrNull()?.let { list += FrameEffect(layer = it) }
         // Order the final fold by the user's reorderable effectStack (the
         // ordered source of truth), refreshing params in place and appending any
@@ -4035,7 +4230,7 @@ private fun stackEffectFingerprint(effect: StackEffect): String = when (effect) 
     is codes.pepper.whimsicalart.feature.editor.domain.BeautyHairEffect ->
         "beauty:hair:${effect.intensity}:${effect.color}"
     is codes.pepper.whimsicalart.feature.editor.domain.BeautyPenEffect ->
-        "beauty:pen:${effect.strokes.size}:${effect.strokes.hashCode()}"
+        "beauty:pen:${effect.strokes.size}:${effect.strokes.hashCode()}:${effect.opacity}:${effect.color}"
 }
 
 private fun orderedMerge(
@@ -4082,4 +4277,49 @@ private fun distanceSquared(a: PointF, b: PointF): Float {
     val dx = a.x - b.x
     val dy = a.y - b.y
     return dx * dx + dy * dy
+}
+
+/**
+ * Derives one [BeautyLayerSpec] per active beauty sub-tool (in the fold order)
+ * from the editor-owned beauty parameters — the editor-side equivalent of the
+ * former `BeautyViewModel.activeSpecs()`. Geometry is resolved lazily by the
+ * shared geometry context at fold time, so specs carry no geometry.
+ *
+ * This is the SINGLE source of truth for the beauty sub-set of the stack: the
+ * lost-focus commit ([buildStackSnapshot]) and every live fold
+ * ([EditorViewModel.beautyEffectsForFold]) derive beauty layers from the same
+ * specs, so the live preview, the committed stack and the saved output all
+ * describe the same per-parameter result (docs/effect_stack.md → Beauty commit
+ * on lost focus). Top-level internal so the screen's commit path can rebuild
+ * the snapshot without the ViewModel wiring a live -> committed copy.
+ */
+internal fun BeautyParams.buildBeautySpecs(): List<BeautyLayerSpec> {
+    val list = mutableListOf<BeautyLayerSpec>()
+    if (auto > 0f) list += BeautyLayerSpec("beauty:auto", auto)
+    if (smoothing > 0f) list += BeautyLayerSpec("beauty:smoothing", smoothing)
+    if (teeth > 0f) list += BeautyLayerSpec("beauty:teeth", teeth)
+    if (eyeBrighten > 0f) list += BeautyLayerSpec("beauty:eye_brighten", eyeBrighten)
+    if (darkCircle > 0f) list += BeautyLayerSpec("beauty:dark_circles", darkCircle)
+    if (spots > 0f) list += BeautyLayerSpec("beauty:spots", spots)
+    if (wrinkles > 0f) list += BeautyLayerSpec("beauty:wrinkles", wrinkles)
+    if (skinTone != 0f) list += BeautyLayerSpec("beauty:skin_tone", skinTone)
+    if (faceSlim != 0f) list += BeautyLayerSpec("beauty:slim", faceSlim)
+    if (eyeEnlarge != 0f) list += BeautyLayerSpec("beauty:eye_enlarge", eyeEnlarge)
+    if (nose != 0f) list += BeautyLayerSpec("beauty:nose", nose)
+    if (jaw != 0f) list += BeautyLayerSpec("beauty:jaw", jaw)
+    if (lipstick > 0f) list += BeautyLayerSpec("beauty:lipstick", lipstick, color = lipstickColor)
+    if (blush > 0f) list += BeautyLayerSpec("beauty:blush", blush, color = blushColor)
+    if (eyeShadow > 0f) list += BeautyLayerSpec("beauty:eye_shadow", eyeShadow, color = eyeShadowColor)
+    if (eyeliner > 0f) list += BeautyLayerSpec("beauty:eyeliner", eyeliner, color = eyelinerColor)
+    if (foundation > 0f) list += BeautyLayerSpec("beauty:foundation", foundation, color = foundationColor)
+    if (hair > 0f) list += BeautyLayerSpec("beauty:hair", hair, color = hairColor)
+    if (brushStrokes.isNotEmpty() || activeStroke != null) {
+        list += BeautyLayerSpec(
+            toolKey = "beauty:pen",
+            strokes = brushStrokes + listOfNotNull(activeStroke),
+            opacity = brushOpacity,
+            color = penColor
+        )
+    }
+    return list
 }

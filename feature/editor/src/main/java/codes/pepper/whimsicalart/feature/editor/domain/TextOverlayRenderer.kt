@@ -8,11 +8,14 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
 import androidx.core.content.res.ResourcesCompat
+import codes.pepper.whimsicalart.core.domain.UniformFit
 import codes.pepper.whimsicalart.feature.editor.R
 import codes.pepper.whimsicalart.feature.editor.domain.bokeh.BokehProcessor
 import java.util.LinkedHashMap
 import kotlin.math.ceil
 import kotlin.math.floor
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
@@ -49,8 +52,19 @@ internal object TextOverlayRenderer {
         if (texts.isEmpty()) return
         val draw = android.graphics.Canvas(bitmap)
         for (t in texts) {
-            val w = bitmap.width.toFloat()
-            val h = bitmap.height.toFloat()
+            val refW = t.referenceWidth.takeIf { it > 0 } ?: bitmap.width
+            val refH = t.referenceHeight.takeIf { it > 0 } ?: bitmap.height
+            val fit = UniformFit.of(bitmap.width, bitmap.height, refW, refH)
+            // The text is laid out inside the FITTED reference frame (the same
+            // frame the item was captured against), then centred in the
+            // destination with the fit offset — so an anchored item keeps its
+            // on-image wrap box and position when an earlier effect changes the
+            // base (identity when the reference is unset/absent) and all of the
+            // block math below stays a pure function of (w,h,cx,cy).
+            val w = fit.measureX(1f, refW)
+            val h = fit.measureY(1f, refH)
+            val lox = fit.offsetX
+            val loy = fit.offsetY
 
             // The rasterised text BLOCK is cached per item, keyed by every
             // parameter that changes its pixels — content, colour, font, size,
@@ -60,29 +74,41 @@ internal object TextOverlayRenderer {
             // recomposites its once-rasterised block bitmap instead of
             // re-measuring + re-wrapping + re-rasterising the glyphs on record
             // (the fold runs the overlay, then the stamp). Position and rotation
-            // are NOT in the key: they are transforms applied at composite time,
-            // so a moved/rotated but otherwise identical item still hits.
+            // are NOT in the key and the block is placed from the CURRENT centre
+            // (see the offset in [CachedTextBlock]) — transforms applied at
+            // composite time, so a moved/rotated but otherwise identical item
+            // still hits AND lands on its live position.
             val textKey = textBlockKey(t, w, h)
             val entry = textBlockCache.remove(textKey)
             if (entry != null) {
                 textBlockCache[textKey] = entry
-                val cx = t.x * w
-                val cy = t.y * h
+                val cx = lox + t.x * w
+                val cy = loy + t.y * h
                 // The BLUR background is baked into the PHOTO, not the cached
                 // glyph block, so it must be repainted on every fresh canvas —
                 // right before THIS block composites so z-order across items
                 // stays identical to the rasterisation path. The measurement is
                 // the cached one (never re-measured per fold).
-                drawBlurBackground(draw, bitmap, context, t, w, h, cx, cy, entry.measure)
+                drawBlurBackground(draw, bitmap, context, t, w, h, cx, cy, lox, loy, entry.measure)
+                // The cached block composites from the CURRENT centre, never a
+                // stored absolute left/top (which would pin a MOVED item to its
+                // ORIGINAL raster position while the blur oval above follows the
+                // move). [offsetLeft]/[offsetTop] are position-independent (the
+                // bitmap top-left relative to the item centre at raster time), so
+                // the centre-about rotate lands the block on the live spot. Scale
+                // is NOT a composite transform: the block is rasterised at its
+                // effective on-image size for this scale (the key holds it), so
+                // the cached bitmap is already the full-resolution glyphs — a
+                // canvas scale here would both double-apply the factor and
+                // bitmap-upscale the vector glyphs (Text is vector, docs/effect_stack.md).
                 draw.save()
                 draw.rotate(t.rotationDegrees, cx, cy)
-                draw.scale(t.scale, t.scale, cx, cy)
-                draw.drawBitmap(entry.bitmap, entry.left, entry.top, null)
+                draw.drawBitmap(entry.bitmap, cx + entry.offsetLeft, cy + entry.offsetTop, null)
                 draw.restore()
                 continue
             }
 
-            val measure = measureTextBlock(context, t, w, h)
+            val measure = measureTextBlock(context, t, w, h, t.scale)
             val paint = measure.paint
             val lines = measure.lines
             val lineHeight = measure.lineHeight
@@ -91,12 +117,12 @@ internal object TextOverlayRenderer {
             val textSize = measure.textSize
             val last = measure.last ?: continue
 
-            val cx = t.x * w
-            val cy = t.y * h
+            val cx = lox + t.x * w
+            val cy = loy + t.y * h
 
             // Rasterise the block into its own bitmap (with a margin so the
             // background pad, outline overhang and shadow reach never clip), then
-            // composite it in the item's rotate/scale frame — bit-identical to
+            // composite it in the item's ROTATE frame — bit-identical to
             // drawing the block directly because the canvas only ever paints
             // SRC_OVER onto this image.
             val padX = textSize * 0.2f
@@ -105,9 +131,9 @@ internal object TextOverlayRenderer {
             val top = cy - blockHeight / 2f - padY
             val right = cx + blockWidth / 2f + padX
             val bottom = cy + blockHeight / 2f + padY
-            val strokeWidthPx = if (t.outline.enabled) (t.outline.size * w).coerceAtLeast(0.5f) else 0f
+            val strokeWidthPx = if (t.outline.enabled) (t.outline.size * w * t.scale).coerceAtLeast(0.5f) else 0f
             val shadowReach = if (t.shadow.enabled) {
-                val dist = t.shadow.distance * w
+                val dist = t.shadow.distance * w * t.scale
                 dist + (dist * 0.25f).coerceAtLeast(0.1f)
             } else {
                 0f
@@ -152,9 +178,17 @@ internal object TextOverlayRenderer {
             }
 
             val shadow = t.shadow
-            if (shadow.enabled) {
+            // A shadow is baked into the FILL paint only when the fill is OPAQUE:
+            // an opaque glyph hides the shadow directly beneath it, so only the
+            // external halo shows (spec: effects_reference.md → *Text* → "an
+            // opaque fill is unchanged"). Under a TRANSLUCENT fill the shadow
+            // must NOT bleed through the glyph — it is hollowed out of the glyph
+            // shape with the same negative-mask pass the outline uses (see the
+            // hollow-shadow block after the outline).
+            val hollowShadow = shadow.enabled && Color.alpha(t.color) < 255
+            if (shadow.enabled && !hollowShadow) {
                 val rad = Math.toRadians(shadow.angleDegrees.toDouble())
-                val dist = shadow.distance * w
+                val dist = shadow.distance * w * t.scale
                 paint.setShadowLayer(
                     (dist * 0.25f).coerceAtLeast(0.1f),
                     kotlin.math.cos(rad).toFloat() * dist,
@@ -210,21 +244,56 @@ internal object TextOverlayRenderer {
                 }
             }
 
+            // A translucent fill must reveal the image THROUGH the glyph, never
+            // the shadow beneath it (spec: effects_reference.md → *Text* → "The
+            // shadow is hollowed out of the glyph like the outline"). The shadow
+            // is drawn into an isolated layer with the glyph fill shape clipped
+            // OUT of it (the same negative-mask pass the outline above uses), so
+            // only the shadow's external band — the offset silhouette outside the
+            // glyph — survives; then the translucent fill renders on top with no
+            // shadow of its own.
+            if (hollowShadow) {
+                val rad = Math.toRadians(shadow.angleDegrees.toDouble())
+                val dist = shadow.distance * w * t.scale
+                val shadowPaint = Paint(paint).apply {
+                    color = shadow.color
+                    setShadowLayer(
+                        (dist * 0.25f).coerceAtLeast(0.1f),
+                        kotlin.math.cos(rad).toFloat() * dist,
+                        kotlin.math.sin(rad).toFloat() * dist,
+                        shadow.color
+                    )
+                }
+                val blockRect = RectF(
+                    bdrawCx - blockWidth / 2f, bdrawCy - blockHeight / 2f,
+                    bdrawCx + blockWidth / 2f, bdrawCy + blockHeight / 2f
+                )
+                bdraw.saveLayer(blockRect, null, android.graphics.Canvas.ALL_SAVE_FLAG)
+                try {
+                    val fillPaths = textFillPaths(paint, t, lines, blockWidth, blockHeight, bdrawCx, bdrawCy, lineHeight)
+                    bdraw.save()
+                    fillPaths.forEach { path -> bdraw.clipOutPath(path) }
+                    drawTextBlock(bdraw, shadowPaint, lines, blockWidth, blockHeight, bdrawCx, bdrawCy, lineHeight, t.alignment)
+                    bdraw.restore()
+                } finally {
+                    bdraw.restore()
+                }
+            }
+
             paint.color = t.color
             drawTextBlock(bdraw, paint, lines, blockWidth, blockHeight, bdrawCx, bdrawCy, lineHeight, t.alignment)
 
             textRasterCount++
-            putTextBlock(textKey, CachedTextBlock(block, leftB, topB, measure))
+            putTextBlock(textKey, CachedTextBlock(block, leftB - cx, topB - cy, measure))
 
             // BLUR background paints the photo under the block BEFORE the glyph
             // block composites, so it sits exactly behind THIS item's text and
             // any later (higher z-order) item stays on top — identical to the
             // cache-hit path above. Reuses the same measurement as the raster.
-            drawBlurBackground(draw, bitmap, context, t, w, h, cx, cy, measure)
+            drawBlurBackground(draw, bitmap, context, t, w, h, cx, cy, lox, loy, measure)
 
             draw.save()
             draw.rotate(t.rotationDegrees, cx, cy)
-            draw.scale(t.scale, t.scale, cx, cy)
             draw.drawBitmap(block, leftB, topB, null)
             draw.restore()
         }
@@ -246,15 +315,19 @@ internal object TextOverlayRenderer {
         h: Float,
         cx: Float,
         cy: Float,
+        lox: Float,
+        loy: Float,
         measure: TextBlockMeasure
     ) {
         if (t.background != TextBackgroundShape.BLUR || t.backgroundBlur <= 0f) return
         if (measure.last == null) return
-        // The BLUR oval is painted at the SCALED cover: scale is baked into the
-        // geometry (scaledBlurCoverRect), never applied as a canvas scale — the
-        // committed oval lands exactly where the scaled glyph block lands, for
-        // any pinch-scale (and never at the unscaled size).
-        val scaled = scaledBlurCoverRect(measure, t, w, h)
+        // The BLUR oval is painted at the SCALED cover: the [measure] handed in
+        // is the block's raster measure, already measured at the item's effective
+        // on-image size (fontSize × scale, see [measureTextBlock]), so its cover
+        // rect IS the on-canvas oval — scale is baked into the geometry, never a
+        // canvas scale, and never rescaled a second time (that is exactly what the
+        // public [scaledBlurCoverRect] rule derives from the UNSCALED measure).
+        val scaled = blurCoverRect(measure, t, w, h, lox, loy)
         blurBackgroundArea(
             draw,
             bitmap,
@@ -271,20 +344,29 @@ internal object TextOverlayRenderer {
 
     /**
      * The exact padded inner rect a BLUR background paints for [t] at target
-     * size (w,h) — the single source of truth for the oval, shared by the
-     * committed rasteriser ([drawBlurBackground]) and scale-parity tests. It is
-     * deliberately measured at the item's UNSCALED size: the oval is composited
-     * from [scaledBlurCoverRect] (the item's own scale frame), so the two never
-     * diverge — see that function for the scaled form both sides actually paint.
+     * size (w,h) at SCALE 1 — the single source of truth for the oval's base
+     * rule, shared by the committed rasteriser ([drawBlurBackground]) and
+     * scale-parity tests. It is deliberately measured at the item's UNSCALED
+     * size: the SCALED oval comes from [scaledBlurCoverRect] (the item's own
+     * scale frame), which is exactly the cover the raster's effective-size
+     * measure produces — so the two never diverge (see that function for the
+     * scaled form both sides actually paint).
      */
     internal fun blurCoverRect(context: Context, t: TextItem, w: Float, h: Float): RectF =
         blurCoverRect(measureTextBlock(context, t, w, h), t, w, h)
 
-    private fun blurCoverRect(measure: TextBlockMeasure, t: TextItem, w: Float, h: Float): RectF {
+    private fun blurCoverRect(
+        measure: TextBlockMeasure,
+        t: TextItem,
+        w: Float,
+        h: Float,
+        lox: Float = 0f,
+        loy: Float = 0f
+    ): RectF {
         val padX = measure.textSize * 0.2f
         val padY = measure.textSize * 0.18f
-        val cx = t.x * w
-        val cy = t.y * h
+        val cx = lox + t.x * w
+        val cy = loy + t.y * h
         return RectF(
             cx - measure.blockWidth / 2f - padX,
             cy - measure.blockHeight / 2f - padY,
@@ -307,8 +389,15 @@ internal object TextOverlayRenderer {
     internal fun scaledBlurCoverRect(context: Context, t: TextItem, w: Float, h: Float): RectF =
         scaledBlurCoverRect(measureTextBlock(context, t, w, h), t, w, h)
 
-    private fun scaledBlurCoverRect(measure: TextBlockMeasure, t: TextItem, w: Float, h: Float): RectF {
-        val cover = blurCoverRect(measure, t, w, h)
+    private fun scaledBlurCoverRect(
+        measure: TextBlockMeasure,
+        t: TextItem,
+        w: Float,
+        h: Float,
+        lox: Float = 0f,
+        loy: Float = 0f
+    ): RectF {
+        val cover = blurCoverRect(measure, t, w, h, lox, loy)
         val cx = cover.centerX()
         val cy = cover.centerY()
         val halfW = cover.width() / 2f * t.scale
@@ -325,8 +414,12 @@ internal object TextOverlayRenderer {
      * outward across the band past the ellipse edge. The [left]/[top]/[right]/
      * [bottom] rect is the SCALED cover (see [scaledBlurCoverRect]) — the item's
      * scale is baked into the geometry, so the oval is painted at the exact
-     * on-canvas position/size the scaled glyph block occupies. Only the item's
-     * rotation is a canvas transform here (about the block centre).
+     * on-canvas position/size the scaled glyph block occupies. The item's
+     * rotation is applied two-sidedly: the patch is composited rotated about the
+     * block centre AND the photo content it carries is re-sampled under that
+     * rotated footprint ([blurRegionOval] reads the source at the rotated
+     * coordinates), so the oval always blurs the pixels actually behind the
+     * rotated text — never a spun slice of the pre-rotation region.
      */
     private fun blurBackgroundArea(
         draw: Canvas,
@@ -357,7 +450,8 @@ internal object TextOverlayRenderer {
         val blended = blurRegionOval(
             bitmap, sx, sy, rw, rh,
             RectF(left, top, right, bottom),
-            radius, feather
+            radius, feather,
+            t.rotationDegrees
         )
 
         draw.save()
@@ -374,6 +468,16 @@ internal object TextOverlayRenderer {
      * under an oval mask centered on [innerRect] — fully blurred inside the
      * ellipse, fading back to the sharp original across the [feather] band past
      * its edge. Returns a new bitmap the caller composites and recycles.
+     *
+     * [rotationDegrees] rotates the sampled CONTENT under the oval's own
+     * rotation (spec: effects_reference.md → *Text* → *Background blur
+     * semantics*): the caller composites the returned patch rotated about the
+     * oval centre, so each patch pixel is seen at `C + Rθ(p − C)` on the canvas.
+     * Writing the photo value AT that rotated position back into the patch makes
+     * every canvas pixel under the oval show the photo content actually behind
+     * it — never a rotated slice of the pre-rotation axis-aligned region, which
+     * is what a naive rotate-the-window draw produces. `0f` (the default) is the
+     * exact axis-aligned fast path, byte-identical to the un-rotated behaviour.
      */
     internal fun blurRegionOval(
         source: Bitmap,
@@ -383,9 +487,20 @@ internal object TextOverlayRenderer {
         rh: Int,
         innerRect: RectF,
         radius: Float,
-        feather: Float
+        feather: Float,
+        rotationDegrees: Float = 0f
     ): Bitmap {
-        val original = Bitmap.createBitmap(source, sx, sy, rw, rh)
+        val original =
+            if (rotationDegrees == 0f) {
+                Bitmap.createBitmap(source, sx, sy, rw, rh)
+            } else {
+                Bitmap.createBitmap(rw, rh, Bitmap.Config.ARGB_8888).apply {
+                    setPixels(
+                        rotatedContentPixels(source, sx, sy, rw, rh, innerRect, rotationDegrees),
+                        0, rw, 0, 0, rw, rh
+                    )
+                }
+            }
         val blended = original.copy(Bitmap.Config.ARGB_8888, true)
         BokehProcessor().applySoftwareBlur(blended, radius.roundToInt().coerceAtLeast(1))
 
@@ -432,10 +547,101 @@ internal object TextOverlayRenderer {
     }
 
     /**
-     * Every parameter that changes the rasterised text block, plus the target
-     * size. Position and rotation are deliberately excluded — they are applied
-     * at composite time in [drawTexts], so a moved/rotated item still hits.
+     * Samples the photo content under the oval's ROTATED footprint for
+     * [blurRegionOval]: the caller composites the patch rotated by
+     * [rotationDegrees] about the oval centre ([innerRect]'s), so the patch
+     * pixel at world `(sx+x, sy+y)` is seen on the canvas at its rotated
+     * position. Writing the photo value at that rotated position back into the
+     * window means every canvas pixel under the oval shows the photo content
+     * actually behind it, blurred (spec: effects_reference.md → *Text* →
+     * *Background blur semantics* — the region is re-sampled live against the
+     * item's new footprint, never a stale/rotated slice of the pre-rotation
+     * region). Bilinear reads keep a rotated oval smooth; the source read is
+     * bounded to the smallest sub-window the mapped corners can touch.
      */
+    private fun rotatedContentPixels(
+        source: Bitmap,
+        sx: Int,
+        sy: Int,
+        rw: Int,
+        rh: Int,
+        innerRect: RectF,
+        rotationDegrees: Float
+    ): IntArray {
+        val centerX = innerRect.centerX()
+        val centerY = innerRect.centerY()
+        val rad = Math.toRadians(rotationDegrees.toDouble())
+        val cos = kotlin.math.cos(rad).toFloat()
+        val sin = kotlin.math.sin(rad).toFloat()
+        val sw = source.width
+        val sh = source.height
+
+        var minX = Int.MAX_VALUE
+        var minY = Int.MAX_VALUE
+        var maxX = Int.MIN_VALUE
+        var maxY = Int.MIN_VALUE
+        val corners = arrayOf(
+            sx to sy,
+            sx + rw - 1 to sy,
+            sx to sy + rh - 1,
+            sx + rw - 1 to sy + rh - 1
+        )
+        for ((ox, oy) in corners) {
+            val relX = ox - centerX
+            val relY = oy - centerY
+            val mx = centerX + relX * cos - relY * sin
+            val my = centerY + relX * sin + relY * cos
+            minX = min(minX, floor(mx).toInt())
+            maxX = max(maxX, ceil(mx).toInt())
+            minY = min(minY, floor(my).toInt())
+            maxY = max(maxY, ceil(my).toInt())
+        }
+        val srcX0 = minX.coerceIn(0, sw - 1)
+        val srcY0 = minY.coerceIn(0, sh - 1)
+        val srcX1 = maxX.coerceIn(0, sw - 1)
+        val srcY1 = maxY.coerceIn(0, sh - 1)
+        val srcW = srcX1 - srcX0 + 1
+        val srcH = srcY1 - srcY0 + 1
+        val peek = IntArray(srcW * srcH)
+        source.getPixels(peek, 0, srcW, srcX0, srcY0, srcW, srcH)
+
+        val out = IntArray(rw * rh)
+        for (y in 0 until rh) {
+            val relY = sy + y - centerY
+            for (x in 0 until rw) {
+                val relX = sx + x - centerX
+                val fx = (centerX + relX * cos - relY * sin).coerceIn(0f, (sw - 1).toFloat())
+                val fy = (centerY + relX * sin + relY * cos).coerceIn(0f, (sh - 1).toFloat())
+                out[y * rw + x] = bilinearSample(peek, srcW, srcH, fx - srcX0, fy - srcY0)
+            }
+        }
+        return out
+    }
+
+    /** Bilinear fetch from [px] (`stride×rows`), clamped inside the window. */
+    private fun bilinearSample(px: IntArray, stride: Int, rows: Int, fx: Float, fy: Float): Int {
+        val x0 = floor(fx).toInt().coerceAtLeast(0)
+        val y0 = floor(fy).toInt().coerceAtLeast(0)
+        val x1 = (x0 + 1).coerceAtMost(stride - 1)
+        val y1 = (y0 + 1).coerceAtMost(rows - 1)
+        val tx = fx - x0
+        val ty = fy - y0
+        val top = blendColor(px[y0 * stride + x0], px[y0 * stride + x1], tx)
+        val bottom = blendColor(px[y1 * stride + x0], px[y1 * stride + x1], tx)
+        return blendColor(top, bottom, ty)
+    }
+
+    /** Per-channel ARGB linear mix, `t` in 0..1. */
+    private fun blendColor(a: Int, b: Int, t: Float): Int {
+        val inv = 1f - t
+        return Color.argb(
+            (Color.alpha(a) * inv + Color.alpha(b) * t).roundToInt(),
+            (Color.red(a) * inv + Color.red(b) * t).roundToInt(),
+            (Color.green(a) * inv + Color.green(b) * t).roundToInt(),
+            (Color.blue(a) * inv + Color.blue(b) * t).roundToInt()
+        )
+    }
+
     /**
      * Single measurement for a text block — shared by the rasterisation path AND
      * [drawBlurBackground], so the BLUR oval always spans exactly the same rect
@@ -452,23 +658,29 @@ internal object TextOverlayRenderer {
         val last: String? get() = lines.lastOrNull()
     }
 
-    private fun measureTextBlock(context: Context, t: TextItem, w: Float, h: Float): TextBlockMeasure {
+    private fun measureTextBlock(context: Context, t: TextItem, w: Float, h: Float, scale: Float = 1f): TextBlockMeasure {
         textMeasureCount++
-        // SCALE IS APPLIED EXACTLY ONCE — at composite time, via draw.scale
-        // under the item's rotate/scale frame (drawTexts). The block therefore
-        // measures/rasterises at the item's UNSCALED size (fontSize * w); the
-        // live overlay mirrors this (TextOverlayLayer draws the text at the raw
-        // font size and scales its graphicsLayer once), so a pinch-scaled item
-        // commits at the same size the canvas shows. Baking t.scale here AND
-        // drawing under draw.scale would square it (scale²).
-        val textSize = (t.fontSize * w).coerceAtLeast(2f)
+        // The glyphs are rasterised at their EFFECTIVE on-image size — the font
+        // size combined with the item's own [t.scale] (docs/effect_stack.md →
+        // *Text and sticker overlays — parameterised lists* → *Text is vector*):
+        // an item enlarged through the selection grid re-renders the vector
+        // glyphs at the new size, so grid-scaling stays sharp in the committed /
+        // full-size result. Scale is therefore baked into the RASTER ONLY: the
+        // wrap box (maxLineWidth), the block geometry and every element
+        // (background pad, outline stroke, shadow, margin) scale together by the
+        // same factor, and the composite draws the block at 1:1 — NEVER a canvas
+        // scale, which would bitmap-upscale the base-size raster (pixelation) and
+        // double-apply the factor. The blur geometry keeps measuring at scale 1
+        // ([blurCoverRect]/[scaledBlurCoverRect]) and rescales geometrically, so
+        // nothing ever squares the factor.
+        val textSize = (t.fontSize * w * scale).coerceAtLeast(2f)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             this.textSize = textSize
             typeface = typefaceFor(context, t)
             isUnderlineText = t.style.contains(TextStyleFlag.UNDERLINE)
             isStrikeThruText = t.style.contains(TextStyleFlag.STRIKETHROUGH)
         }
-        val maxLineWidth = w * 0.95f
+        val maxLineWidth = w * 0.95f * scale
         val lines = wrapTexlines(paint, t.text, maxLineWidth)
         val metrics = paint.fontMetrics
         val lineHeight = metrics.descent - metrics.ascent
@@ -495,20 +707,29 @@ internal object TextOverlayRenderer {
         t.alignment,
         t.shadow.enabled, t.shadow.angleDegrees, t.shadow.distance, t.shadow.color,
         t.outline.enabled, t.outline.size, t.outline.color, t.outline.blur,
-        t.background, t.backgroundColor, w, h
+        t.background, t.backgroundColor, w, h,
+        // The block's pixels ARE a function of scale: glyphs are rasterised at
+        // the item's effective on-image size (fontSize × scale), so a grid-scale
+        // change re-rasterises the vector block instead of reusing a base-size
+        // raster and bitmap-scaling it (the sharpness fix; Text is vector).
+        t.scale
     ).joinToString("|")
 
-    /*
-     * Bounded LRU of rasterised text blocks, keyed by [textBlockKey]. The block
-     * bitmap is stored in image coordinates (its [CachedTextBlock.left]/[top]);
-     * composed at the item's live cx/cy under rotate/scale. The item's
+    /**
+     * A rasterised text block. [offsetLeft]/[offsetTop] express the bitmap's
+     * top-left RELATIVE to the item centre (cx, cy) at raster time — position-
+     * independent, so a cache hit (an item whose pixels are unchanged but whose
+     * centre has moved / rotated) reuses the raster and composites it at the
+     * CURRENT centre, exactly where the live overlay shows it. The block's
      * [TextBlockMeasure] rides along so the BLUR background repaint reuses the
-     * exact measurement instead of re-measuring on every fold.
+     * exact measurement instead of re-measuring on every fold. A RESCALED item
+     * is NOT a hit: scale is part of the block's pixels (glyphs re-raster at
+     * their effective on-image size), so it produces a fresh key.
      */
     private class CachedTextBlock(
         val bitmap: Bitmap,
-        val left: Float,
-        val top: Float,
+        val offsetLeft: Float,
+        val offsetTop: Float,
         val measure: TextBlockMeasure
     ) {
         val bytes: Int = bitmap.byteCount

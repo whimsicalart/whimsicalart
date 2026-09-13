@@ -181,6 +181,42 @@ class TextOverlayTest {
         assertEquals(0.25f, item.x, 0.0001f)
         assertEquals(0.25f, item.y, 0.0001f)
     }
+
+    @Test
+    fun `transform added after committed text does not move the restored overlay`() {
+        // Text anchored to its 1200x800 prefix footprint, captured against the
+        // 900x600 fitted family frame. A transform appended BELOW the text does
+        // not touch that footprint, so re-entry restores through the SAME frame
+        // and the stored reference and must land at the exact dp position.
+        val density = Density(1f)
+        val overlay = TextOverlay(id = "a-t", text = "Hi", position = Offset(225f, 150f), fontSize = 45f)
+        val item = overlay.toTextItem(density, 900f, 600f, 0f, 0f, 1200, 800)
+        assertEquals(1200, item.referenceWidth)
+        assertEquals(800, item.referenceHeight)
+
+        val restored = item.toTextOverlay(density, 900f, 600f, 0f, 0f)
+        assertEquals(overlay.position.x, restored.position.x, 0.01f)
+        assertEquals(overlay.position.y, restored.position.y, 0.01f)
+        assertEquals(overlay.fontSize, restored.fontSize, 0.01f)
+    }
+
+    @Test
+    fun `anchored text restore re-expresses into a swapped base via the fit`() {
+        // The text's prefix gains a 90-degree rotate: base 800x1200 fitted into
+        // the same 900x600 box at scale 0.5 → 400x600 offset (250, 0). The stored
+        // fractions belong to the 1200x800 anchor and map through the uniform fit
+        // (scale 1/3, y-centre 166.67), not through the raw swapped-frame fraction.
+        val density = Density(1f)
+        val overlay = TextOverlay(id = "a-s", text = "Hi", position = Offset(225f, 150f), fontSize = 45f)
+        val item = overlay.toTextItem(density, 900f, 600f, 0f, 0f, 1200, 800)
+
+        val restored = item.toTextOverlay(density, 400f, 600f, 250f, 0f)
+        // x = frameX(0.25, 1200) + offset = 0.25*1200/3 + 250 = 350; y = 166.67 + 0.25*800/3 = 233.33.
+        assertEquals(350f, restored.position.x, 0.5f)
+        assertEquals(233.33f, restored.position.y, 0.5f)
+        // fontSize = measureX(45/900, 1200) = (45/900)*1200/3 = 20.
+        assertEquals(20f, restored.fontSize, 0.5f)
+    }
 }
 
 @RunWith(RobolectricTestRunner::class)

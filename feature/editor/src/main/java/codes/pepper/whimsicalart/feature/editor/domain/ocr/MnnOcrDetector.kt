@@ -296,16 +296,22 @@ class MnnOcrDetector @Inject constructor(
      * recognizers carry a `fetch_name_0` output and an `x` input), but older
      * converters used "input"/"output". The first resolvable pair wins and is
      * cached per model, so a format rename degrades to unavailable, never garbage.
+     *
+     * `fetch_name_0__before_tr` MUST stay ahead of `fetch_name_0`: on PaddleX's
+     * export the post-transform alias `fetch_name_0` is a "before-translate"
+     * decode placeholder that MNN reports with all-zero dims, whereas the
+     * `__before_tr` tensor holds the real pre-transform output (the sigmoid map
+     * at orig-scale for det, the softmax/CTC logits for cls/rec).
      */
     companion object {
         private val INPUT_CANDIDATES = listOf("x", "input", "images", "image", "pic", "data")
         private val DET_OUTPUT_CANDIDATES = listOf(
-            "save", "sigmoid_0", "sigmoid_0.tmp_0", "prob", "probs", "output", "out",
-            "fetch_name_0", "tmp_0", "sigmoid_31.tmp_0", "DetResizeForTest.0"
+            "fetch_name_0__before_tr", "fetch_name_0", "save", "sigmoid_0", "sigmoid_0.tmp_0", "prob", "probs", "output", "out",
+            "tmp_0", "sigmoid_31.tmp_0", "DetResizeForTest.0"
         )
         private val PROB_OUTPUT_CANDIDATES = listOf(
-            "softmax_0", "softmax_0.tmp_0", "softmax", "output", "out",
-            "fetch_name_0", "tmp_0", "probs", "prob", "softmax_4.tmp_0"
+            "fetch_name_0__before_tr", "fetch_name_0", "softmax_0", "softmax_0.tmp_0", "softmax", "output", "out",
+            "tmp_0", "probs", "prob", "softmax_4.tmp_0"
         )
     }
 }

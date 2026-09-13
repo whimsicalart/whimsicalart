@@ -237,6 +237,103 @@ class BitmapRendererTest {
     }
 
     @Test
+    fun `stroke captured on a 200x400 reference re-anchors onto the fitted 200x200 position`() {
+        // The stroke's stored fractions belong to its anchor (200x400), not the
+        // 200x200 destination: the fit is height-constrained (scale 0.5, ref
+        // scaled 100x200, centred on x at 50). A ref-space point (0.25, 0.5) —
+        // pixel (50, 200) of the anchor — re-expresses on the WIDTH letterbox axis
+        // to 50 + 0.25*100 = pixel (75, 100). The un-anchored identity maps the
+        // raw fraction to (50, 100): the discriminator between anchored and legacy.
+        val stroke = StrokeLayer(
+            type = StrokeType.PEN,
+            points = listOf(0.25f to 0.5f),
+            brushSize = 0.1f,
+            color = Color.BLACK,
+            referenceWidth = 200,
+            referenceHeight = 400
+        )
+        val canvas = Bitmap.createBitmap(200, 200, Bitmap.Config.ARGB_8888)
+        canvas.eraseColor(Color.WHITE)
+        StrokeOverlayRenderer.drawStrokes(canvas, listOf(stroke))
+
+        val (cx, cy) = paintedCentre(canvas)
+        assertEquals("anchored pen disc must track the fitted base", 75f, cx, 2f)
+        assertEquals("anchored pen disc must sit on the preserved axis", 100f, cy, 2f)
+    }
+
+    @Test
+    fun `anchored stroke and legacy stroke agree when the base size is unchanged`() {
+        // The identity special case: anchoring against a reference equal to the
+        // destination must render byte-identically to a legacy (un-anchored)
+        // stroke — every anchored path degrades to identity for a matching base.
+        fun disc(source: StrokeLayer): Pair<Float, Float> =
+            paintedCentre(
+                Bitmap.createBitmap(200, 200, Bitmap.Config.ARGB_8888).also { canvas ->
+                    canvas.eraseColor(Color.WHITE)
+                    StrokeOverlayRenderer.drawStrokes(canvas, listOf(source))
+                }
+            )
+        val anchored = StrokeLayer(
+            type = StrokeType.PEN,
+            points = listOf(0.25f to 0.5f),
+            brushSize = 0.1f,
+            color = Color.BLACK,
+            referenceWidth = 200,
+            referenceHeight = 200
+        )
+        val legacy = anchored.copy(referenceWidth = 0, referenceHeight = 0)
+        assertEquals(disc(legacy), disc(anchored))
+    }
+
+    @Test
+    fun `stroke re-anchors into a non-proportional destination without distortion`() {
+        // A 200x200 reference into a 200x100 destination: fit scale 0.5, the
+        // scaled reference (100x100) centred on x at 50. A ref-space point
+        // (0.0, 0.5) — the left edge of the reference — maps to 50 + 0.0*100 =
+        // 50, so the disc hugs the reference's scaled LEFT EDGE. The identity
+        // mapping would place it at 0 (the destination's own left edge): the
+        // anchored mapping tracks the reference, never the raw destination.
+        val stroke = StrokeLayer(
+            type = StrokeType.PEN,
+            points = listOf(0.0f to 0.5f),
+            brushSize = 0.05f,
+            color = Color.BLACK,
+            referenceWidth = 200,
+            referenceHeight = 200
+        )
+        val canvas = Bitmap.createBitmap(200, 100, Bitmap.Config.ARGB_8888)
+        canvas.eraseColor(Color.WHITE)
+        StrokeOverlayRenderer.drawStrokes(canvas, listOf(stroke))
+
+        val (cx, cy) = paintedCentre(canvas)
+        assertEquals("anchored disc must track the reference's left edge", 50f, cx, 2f)
+        assertEquals("anchored disc must stay centred vertically", 50f, cy, 2f)
+    }
+
+    /**
+     * The geometric centre of the painted (non-[background]) region's bounding
+     * box on [canvas] — robust against the few px of alpha antialiasing an Edge
+     * mode stamps around a hard disc.
+     */
+    private fun paintedCentre(canvas: Bitmap, background: Int = Color.WHITE): Pair<Float, Float> {
+        var minX = canvas.width
+        var minY = canvas.height
+        var maxX = -1
+        var maxY = -1
+        for (y in 0 until canvas.height) {
+            for (x in 0 until canvas.width) {
+                if (canvas.getPixel(x, y) != background) {
+                    if (x < minX) minX = x
+                    if (x > maxX) maxX = x
+                    if (y < minY) minY = y
+                    if (y > maxY) maxY = y
+                }
+            }
+        }
+        return (minX + maxX) / 2f to (minY + maxY) / 2f
+    }
+
+    @Test
     fun `frame layer draws a border over the image and leaves the centre untouched`() {
         val input = Bitmap.createBitmap(40, 40, Bitmap.Config.ARGB_8888)
         input.eraseColor(Color.WHITE)

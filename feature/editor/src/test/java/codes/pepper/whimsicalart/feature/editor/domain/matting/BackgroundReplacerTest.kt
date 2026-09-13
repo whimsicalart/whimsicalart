@@ -249,6 +249,59 @@ class BackgroundReplacerTest {
     }
 
     @Test
+    fun place_transform_with_smaller_mask_never_reads_out_of_bounds() {
+        // Regression for the full-size fold swallowing reports: the mask (and its
+        // soft-edge band) live at ML resolution — smaller than the folded base.
+        // The transform path used to index the edge band with SOURCE-space
+        // coordinates (`edge[sj * maskW + si]`), which threw an
+        // ArrayIndexOutOfBoundsException once the projected point passed the mask
+        // edge, and requestFullFold's runCatching parked the canvas on the
+        // preview image forever. Sampling must map source → mask like the fast
+        // path and the blur processor.
+        val source = solid(8, 8, Color.RED)
+        val background = solid(8, 8, Color.BLUE)
+        val mask = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.WHITE)
+        }
+
+        val result = BackgroundReplacer.place(
+            source, mask, background,
+            BackgroundReplacer.PlacementTransform(scale = 1f, panX = 0.25f, panY = 0f, freeScaleUp = true),
+            softEdgeWidth = SoftEdgeBand.DEFAULT_WIDTH
+        )
+
+        assertEquals("a projected point inside the source but past the mask maps to the mark", Color.RED, result.getPixel(6, 4))
+        assertEquals("unmarked canvas takes the static background cover", Color.BLUE, result.getPixel(0, 0))
+    }
+
+    @Test
+    fun place_negative_fractional_projection_never_throws() {
+        // Regression for the full-size fold swallowing reports (second OOB
+        // hazard): a grown/rotated placement's edge destination pixels project
+        // just OUTSIDE the source — e.g. `su` lands in `[-1, 0)`. Guarding on
+        // `su.toInt() in 0 until w` is not enough: `(-0.5f).toInt()` truncates to
+        // 0, the guard passes, and [sampleSubject]'s `floor(-0.5)` → -1 reads
+        // `sourcePx[y * srcW - 1]` → OOB. The guard must be FLOAT-based so any
+        // negative fraction stays out. Full-size folds keep the capped ML mask
+        // smaller than the base, so the mask/edge arrays live at mask resolution
+        // too and must be indexed through the same source → mask mapping.
+        val source = solid(200, 150, Color.RED)
+        val background = solid(200, 150, Color.BLUE)
+        val mask = Bitmap.createBitmap(100, 75, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.WHITE)
+        }
+
+        val result = BackgroundReplacer.place(
+            source, mask, background,
+            BackgroundReplacer.PlacementTransform(scale = 1f, rotationDegrees = 15f, freeScaleUp = true),
+            softEdgeWidth = 4
+        )
+
+        assertTrue("a rotated placement grows the canvas", result.width > 200)
+        assertTrue("the grown canvas is red inside the source region", Color.red(result.getPixel(100, 75)) in 0..255)
+    }
+
+    @Test
     fun place_rotation_turns_the_subject_keeping_the_backdrop_axis_aligned() {
         val source = solid(8, 8, Color.RED)
         val background = solid(8, 8, Color.BLUE)

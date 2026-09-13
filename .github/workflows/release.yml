@@ -1,9 +1,15 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Release version (e.g. 1.2.3 or v1.2.3). Leave empty to auto-bump the
+          patch of the last tag (or 0.1.0 when there are no tags).
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -19,8 +25,11 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: Checkout
+      - name: Checkout with full history (needed for tag lookups)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
@@ -30,6 +39,26 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
+
+      - name: Resolve release version
+        id: version
+        run: |
+          VERSION_INPUT="${{ inputs.version }}"
+          if [ -n "$VERSION_INPUT" ]; then
+            VERSION="${VERSION_INPUT#v}"
+          else
+            LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+            if [ -n "$LAST_TAG" ]; then
+              BASE="${LAST_TAG#v}"
+              IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
+              PATCH="${PATCH:-0}"
+              VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+            else
+              VERSION="0.1.0"
+            fi
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Configure signing credentials
         run: |
@@ -49,32 +78,19 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
       - name: Build signed release APK
-        run: ./gradlew assembleRelease --no-daemon
+        run: ./gradlew assembleRelease -PVERSION_NAME=${{ steps.version.outputs.version }} --no-daemon
 
       - name: Verify APK signature
         run: |
           BT=$(ls "$ANDROID_HOME"/build-tools | sort -V | tail -1)
           "$ANDROID_HOME/build-tools/$BT/apksigner" verify --print-certs app/build/outputs/apk/release/app-release.apk
 
-      - name: Get version name
-        id: version
-        run: |
-          VERSION_NAME=$(grep '^VERSION_NAME=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')
-          echo "version_name=${VERSION_NAME:-1.0.0}" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub Release
+      - name: Create GitHub Release and upload APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: WhimsicalArt ${{ steps.version.outputs.version_name }}
-          body: |
-            ## WhimsicalArt ${{ steps.version.outputs.version_name }}
-
-            ### Downloads
-            - Install the signed APK on your Android device (API 26+)
-
-            ### Notes
-            - Tag: `${{ github.ref_name }}`
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: WhimsicalArt ${{ steps.version.outputs.version }}
+          generate_release_notes: true
           files: app/build/outputs/apk/release/*.apk
           draft: false
           prerelease: false

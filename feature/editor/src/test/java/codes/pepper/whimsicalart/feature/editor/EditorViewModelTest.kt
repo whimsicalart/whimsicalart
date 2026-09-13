@@ -39,6 +39,7 @@ import codes.pepper.whimsicalart.feature.editor.ui.viewmodel.HistoryKind
 import codes.pepper.whimsicalart.feature.editor.ui.background.BackgroundPresets
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 import kotlin.math.roundToInt
 import org.junit.Assert.*
@@ -1117,6 +1118,11 @@ class EditorViewModelTest {
     @Test
     fun `removeStackEffect neutralises a beauty param and entry so re-entry does not resurrect it`() {
         viewModel.updateBeautyParams { it.copy(auto = 50f) }
+        // The editor is UNSTACKED while BEAUTY is focused: updateBeautyParams
+        // keeps the value live in the params only, so the committed beauty layer
+        // needs the same explicit setEffectStack the adjustment remove-test uses
+        // below (a real lost-focus commit flows through buildStackSnapshot).
+        viewModel.setEffectStack(listOf(BeautyAutoEffect(intensity = 50f)))
         val existing = viewModel.uiState.value.effectStack
             .firstOrNull { it is codes.pepper.whimsicalart.feature.editor.domain.BeautyAutoEffect }
         assertNotNull(existing)
@@ -1624,22 +1630,22 @@ class EditorViewModelTest {
     fun `preview resolution always keeps the preview larger than the displayed footprint`() {
         // Spec (docs/effect_stack.md → Choosing preview resolution): the preview
         // bitmap always exceeds the displayed footprint so the display downscales
-        // it ("looks sharp while panning"). The ceiling rounding of quantizedScale
+        // it ("looks sharp while panning"). The ceiling rounding of quantizePreviewScale
         // guarantees previewMax ≥ viewportMax × effectiveZoom across every 5%-bucket
         // boundary (bounded by the source: you cannot preview above source res).
         viewModel.setViewBox(1080, 900)
         val literals = listOf(0.5f, 0.8f, 1f)
         for (sourceMax in listOf(800, 1200, 4000, 10000, 20000)) {
-            for (zoom in literals) {
-                viewModel.setZoom(zoom)
-                val scale = viewModel.previewScaleFor(sourceMax, sourceMax)
-                val previewMax = (sourceMax * scale).toInt()
-                val displayed = minOf(((1080 * zoom).toInt()), sourceMax)
+            for (canvasZoomVal in literals) {
+                viewModel.setCanvasZoom(canvasZoomVal)
+                val previewScale = viewModel.previewScaleFor(sourceMax, sourceMax)
+                val previewMax = (sourceMax * previewScale).toInt()
+                val displayed = minOf(((1080 * canvasZoomVal).toInt()), sourceMax)
                 assertTrue(
-                    "source=$sourceMax @ zoom=$zoom scale=$scale preview=$previewMax must cover displayed=$displayed",
+                    "source=$sourceMax @ canvasZoom=$canvasZoomVal previewScale=$previewScale preview=$previewMax must cover displayed=$displayed",
                     previewMax >= displayed
                 )
-                assertTrue(scale in 0.05f..1f)
+                assertTrue(previewScale in 0.05f..1f)
             }
         }
     }
@@ -1658,7 +1664,7 @@ class EditorViewModelTest {
         src.recycle()
         viewModel.setImageUri(Uri.fromFile(file))
         viewModel.setViewBox(600, 400)
-        viewModel.setZoom(1f)
+        viewModel.setCanvasZoom(1f)
         viewModel.updateSharpness(30f)
 
         // The VM's source decode (sharpnessDecodedSource) is the bounded EXIF-
@@ -1727,7 +1733,7 @@ class EditorViewModelTest {
             excludeCurrentTool = false,
             visibleWidthPx = 800,
             visibleHeightPx = 600,
-            zoom = 1f
+            canvasZoom = 1f
         )
         repeat(2000) {
             looper.idle()
@@ -1772,7 +1778,7 @@ class EditorViewModelTest {
                     excludeCurrentTool = true,
                     visibleWidthPx = 800,
                     visibleHeightPx = 600,
-                    zoom = 1f
+                    canvasZoom = 1f
                 )
                 issued++
             }
@@ -1801,6 +1807,157 @@ class EditorViewModelTest {
             }
         }
         assertTrue("eye-off composite keeps the full two-tone frame (red=$sawRed green=$sawGreen)", sawRed > 0 && sawGreen > 0)
+    }
+
+    @Test
+    fun `full-size zoom fold publishes the full-size composite including committed text and sticker layers`() {
+        // The report: after committing text/stickers the canvas stayed on the
+        // small preview image — displayScale > 1 never swapped to the ready
+        // full-size fold — because the full-size fold used to throw and
+        // requestFullFold swallowed it inside runCatching. Publish semantics:
+        // with displayScale > 1 a committed text+sticker stack must land a
+        // composite AT FULL SOURCE SIZE (never parked at preview size), and a
+        // second unrelated refresh must keep serving that full-size fold.
+        val context: Context = ApplicationProvider.getApplicationContext()
+        val file = File(context.cacheDir, "fullfold_textsticker.jpg")
+        // Large enough that the quantized preview bucket is BELOW the full
+        // source — so the published composite must be the FULL-size fold, not a
+        // re-served preview.
+        val src = Bitmap.createBitmap(1600, 1000, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.RED)
+        }
+        FileOutputStream(file).use { out -> src.compress(Bitmap.CompressFormat.JPEG, 100, out) }
+        src.recycle()
+        viewModel.setImageUri(Uri.fromFile(file))
+        viewModel.setViewBox(800, 600)
+
+        val textItem = codes.pepper.whimsicalart.feature.editor.domain.TextItem(
+            id = "t1", text = "Q", color = 0xFFFFFFFF.toInt(),
+            fontSize = 0.5f, x = 0.5f, y = 0.5f
+        )
+        val sticker = codes.pepper.whimsicalart.feature.stickers.domain.StickerItem(
+            stickerId = "e1", emojiText = "\uD83D\uDE00",
+            x = 0.3f, y = 0.4f, widthFrac = 0.4f, heightFrac = 0.4f
+        )
+        val snapshot = listOf(
+            codes.pepper.whimsicalart.feature.editor.domain.TextEffect(layers = listOf(textItem)),
+            codes.pepper.whimsicalart.feature.editor.domain.StickerEffect(layers = listOf(sticker))
+        )
+        viewModel.syncLayerState(snapshot, snapshot.associate { it.layerKey to it.layerKey })
+
+        val bounded = codes.pepper.whimsicalart.feature.editor.domain.decodeBoundedOriented(
+            context.contentResolver, Uri.fromFile(file)
+        )!!
+        // Zoom past the preview footprint → displayScale > 1 → the full-size fold.
+        viewModel.setCanvasZoom(2f)
+
+        val looper = shadowOf(Looper.getMainLooper())
+        var full: Bitmap? = null
+        val observed = StringBuilder()
+        var previewSeen = false
+        var issued = 0
+        repeat(3000) {
+            looper.idle()
+            val c = viewModel.uiState.value.compositePreview
+            if (c != null) {
+                observed.append("${c.width}x${c.height} ")
+                if (c.width == bounded.width && c.height == bounded.height) {
+                    full = c
+                }
+                if (!previewSeen) {
+                    previewSeen = true
+                    // Re-issue ONCE after the planner has recomputed the fitted
+                    // preview size, so the displayScale>1 gate keys on the real
+                    // ratio. After that, stop re-issuing: every refresh cancels
+                    // and restarts the debounced full-size request.
+                    viewModel.refreshCompositePreview(
+                        codes.pepper.whimsicalart.feature.editor.domain.EditorRenderBundle(),
+                        includeTail = true,
+                        excludeCurrentTool = false,
+                        visibleWidthPx = 800,
+                        visibleHeightPx = 600,
+                        canvasZoom = 2f
+                    )
+                }
+            } else if (!previewSeen && issued < 100) {
+                // The first fold can break while the source decode is still
+                // loading; re-kick (like the screen's measure-pass re-fire) until
+                // the preview actually publishes.
+                viewModel.refreshCompositePreview(
+                    codes.pepper.whimsicalart.feature.editor.domain.EditorRenderBundle(),
+                    includeTail = true,
+                    excludeCurrentTool = false,
+                    visibleWidthPx = 800,
+                    visibleHeightPx = 600,
+                    canvasZoom = 2f
+                )
+                issued++
+            }
+            if (full != null) return@repeat
+            Thread.sleep(5)
+        }
+        if (full == null) {
+            // The full-size fold is debounced (FULL_FOLD_DEBOUNCE_MS); advance the
+            // Robolectric scheduler past the delay so it actually runs, then poll
+            // for the Default-dispatcher completion to land back on the main queue.
+            shadowOf(Looper.getMainLooper()).idleFor(1000, TimeUnit.MILLISECONDS)
+        }
+        repeat(6000) {
+            looper.idle()
+            viewModel.uiState.value.compositePreview?.let {
+                observed.append("${it.width}x${it.height} ")
+                if (it.width == bounded.width && it.height == bounded.height) {
+                    full = it
+                }
+            }
+            if (full != null) return@repeat
+            Thread.sleep(5)
+        }
+        assertNotNull(
+            "full-size fold must publish AT FULL SOURCE SIZE (observed: $observed)",
+            full
+        )
+        // The full-size composite must actually contain the committed layers (a
+        // pure-RED base means the fold fell back to the merged base and dropped
+        // the text/sticker layers).
+        var nonRed = 0
+        for (x in 0 until bounded.width) {
+            for (y in 0 until bounded.height) {
+                if (full!!.getPixel(x, y) != 0xFFFF0000.toInt()) nonRed++
+            }
+        }
+        assertTrue(
+            "the published full-size composite must contain the text/sticker layers (nonRED=$nonRed)",
+            nonRed > 0
+        )
+
+        // An unrelated refresh keeps serving the published full-size composite —
+        // no bounce back to the small preview.
+        viewModel.refreshCompositePreview(
+            codes.pepper.whimsicalart.feature.editor.domain.EditorRenderBundle(),
+            includeTail = true,
+            excludeCurrentTool = false,
+            visibleWidthPx = 800,
+            visibleHeightPx = 600,
+            canvasZoom = 2f
+        )
+        repeat(1000) {
+            looper.idle()
+            val c = viewModel.uiState.value.compositePreview
+            if (c != null && c.width == bounded.width && c.height == bounded.height) {
+                return@repeat
+            }
+            Thread.sleep(5)
+        }
+        val cache = viewModel.fullSizeFoldCacheForTest()
+        assertNotNull(
+            "the full-size fold must be CACHED (a real layered fold, not the " +
+                "empty-effects base short-circuit that never populates the cache)",
+            cache.lastImage
+        )
+        val cached = viewModel.uiState.value.compositePreview
+        assertEquals(1600, cached!!.width)
+        assertEquals(1000, cached!!.height)
     }
 
     @Test
@@ -1888,20 +2045,31 @@ class EditorViewModelTest {
     // --- Beauty pen (BEAUTY + BRIGHTNESS_PEN, Category B brush) --------------
 
     @Test
-    fun `beauty pen drag sequence appends a normalized stroke to the effect stack`() {
+    fun `beauty pen drag sequence keeps the stroke live and commits it to the stack on lost focus`() {
         viewModel.startBeautyPenStroke(PointF(0.5f, 0.5f))
         viewModel.moveBeautyPenStroke(PointF(0.55f, 0.5f))
         viewModel.endBeautyPenStroke()
 
-        val state = viewModel.uiState.value
-        assertNull(state.beauty.activeStroke)
-        assertEquals(1, state.beauty.brushStrokes.size)
-        assertEquals(2, state.beauty.brushStrokes[0].points.size)
+        val dragged = viewModel.uiState.value
+        assertNull(dragged.beauty.activeStroke)
+        assertEquals(1, dragged.beauty.brushStrokes.size)
+        assertEquals(2, dragged.beauty.brushStrokes[0].points.size)
         // The brush size is carried as a width fraction (resolution-independent,
         // like the standalone pen) — normalized against the source width.
-        assertEquals(30f / 2000f, state.beauty.brushStrokes[0].size, 1e-4f)
+        assertEquals(30f / 2000f, dragged.beauty.brushStrokes[0].size, 1e-4f)
 
-        val penLayers = state.effectStack.filterIsInstance<BeautyPenEffect>()
+        // While the tool is focused the editor is UNSTACKED: the stroke lives in
+        // the live params only, NOT in the committed stack yet — it lands there
+        // exactly once on lost focus (commit-on-lost-focus, same as the scaling
+        // slider / standalone pen).
+        assertTrue(dragged.effectStack.filterIsInstance<BeautyPenEffect>().isEmpty())
+
+        // Lost focus: the screen's commit path — snapshot derived from the live
+        // params → syncLayerState — stores the stroke layer.
+        val snapshot = buildStackSnapshot(viewModel.uiState.value, EditorRenderBundle())
+        viewModel.syncLayerState(snapshot, emptyMap())
+
+        val penLayers = viewModel.uiState.value.effectStack.filterIsInstance<BeautyPenEffect>()
         assertEquals(1, penLayers.size)
         assertEquals(1, penLayers[0].strokes.size)
         assertEquals(2, penLayers[0].strokes[0].points.size)
@@ -1922,11 +2090,20 @@ class EditorViewModelTest {
     }
 
     @Test
-    fun `beauty pen colour and opacity travel into the live pen layer`() {
+    fun `beauty pen colour and opacity travel into the live pen layer and the committed stack`() {
         val colour = 0xFF3366CC.toInt()
         viewModel.updateBeautyParams { it.copy(penColor = colour, brushOpacity = 0.7f) }
         viewModel.startBeautyPenStroke(PointF(0.5f, 0.5f))
         viewModel.endBeautyPenStroke()
+
+        // While focused the values are LIVE in the params (single source of
+        // truth); the committed pen layer gets them once on lost focus.
+        val focused = viewModel.uiState.value
+        assertEquals(colour, focused.beauty.penColor)
+        assertEquals(0.7f, focused.beauty.brushOpacity)
+
+        val snapshot = buildStackSnapshot(viewModel.uiState.value, EditorRenderBundle())
+        viewModel.syncLayerState(snapshot, emptyMap())
 
         val penLayers = viewModel.uiState.value.effectStack.filterIsInstance<BeautyPenEffect>()
         assertEquals(1, penLayers.size)
@@ -1944,6 +2121,12 @@ class EditorViewModelTest {
         viewModel.startBeautyPenStroke(PointF(0.5f, 0.5f))
         viewModel.endBeautyPenStroke()
 
+        // The live params are the single source of truth while focused.
+        assertEquals(penColour, viewModel.uiState.value.beauty.penColor)
+        assertEquals(lipColour, viewModel.uiState.value.beauty.lipstickColor)
+
+        val first = buildStackSnapshot(viewModel.uiState.value, EditorRenderBundle())
+        viewModel.syncLayerState(first, emptyMap())
         val stack = viewModel.uiState.value.effectStack
         val pen = stack.filterIsInstance<BeautyPenEffect>().single()
         val lipstick = stack.filterIsInstance<BeautyLipstickEffect>().single()
@@ -1959,13 +2142,19 @@ class EditorViewModelTest {
         assertEquals(penColour, state.beauty.penColor)
         assertEquals(codes.pepper.whimsicalart.feature.beauty.ui.MakeupPalette.colors.first(), state.beauty.blushColor)
         assertEquals(codes.pepper.whimsicalart.feature.beauty.ui.MakeupPalette.colors.first(), state.beauty.eyeShadowColor)
-        assertEquals(codes.pepper.whimsicalart.feature.beauty.ui.MakeupPalette.colors.first(), state.beauty.eyelinerColor)
+        // Eyeliner's never-picked default is black, unlike the other makeup tools.
+        assertEquals(android.graphics.Color.BLACK, state.beauty.eyelinerColor)
         assertEquals(codes.pepper.whimsicalart.feature.beauty.ui.MakeupPalette.colors.first(), state.beauty.foundationColor)
         assertEquals(codes.pepper.whimsicalart.feature.beauty.ui.MakeupPalette.colors.first(), state.beauty.hairColor)
-        assertEquals(
-            penColour,
-            viewModel.uiState.value.effectStack.filterIsInstance<BeautyPenEffect>().single().color
-        )
+        assertEquals(penColour, state.beauty.penColor)
+
+        // The re-commit refreshes the lipstick layer IN PLACE; the pen layer
+        // keeps its own dedicated colour untouched.
+        val second = buildStackSnapshot(viewModel.uiState.value, EditorRenderBundle())
+        viewModel.syncLayerState(second, emptyMap())
+        val after = viewModel.uiState.value.effectStack
+        assertEquals(0xFF00FF00.toInt(), after.filterIsInstance<BeautyLipstickEffect>().single().color)
+        assertEquals(penColour, after.filterIsInstance<BeautyPenEffect>().single().color)
     }
 
     // --- Background placement -------------------------------------------------
@@ -2235,7 +2424,7 @@ class EditorViewModelTest {
                         excludeCurrentTool = excludeCurrentTool,
                         visibleWidthPx = 800,
                         visibleHeightPx = 600,
-                        zoom = 1f
+                        canvasZoom = 1f
                     )
                     issued++
                 }

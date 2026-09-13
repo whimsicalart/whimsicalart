@@ -75,6 +75,24 @@ class BlurViewModel @Inject constructor() : ViewModel() {
         }
     }
 
+    /**
+     * Re-presents the committed strokes into the live state on tool re-entry,
+     * translated through the CURRENT anchored frame (docs/effect_stack.md →
+     * *Positional layers*): the committed fractions are mapped ref→frame by the
+     * same uniform fit the renderer uses, so a re-entered brush never rides stale
+     * screen positions after an earlier effect changed the layer's base.
+     */
+    fun restoreStrokes(strokes: List<BlurStroke>) {
+        _uiState.update {
+            it.copy(
+                strokes = strokes,
+                currentStroke = null,
+                liveBlurApplied = false,
+                strokesVersion = it.strokesVersion + 1
+            )
+        }
+    }
+
     fun onDragStart(position: Offset) {
         _uiState.update { state ->
             if (state.isErasing) {

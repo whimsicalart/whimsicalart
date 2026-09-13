@@ -124,16 +124,24 @@ these five names:
   math.
 - **`canvasZoom`** — the **user's viewport magnification** relative to the
   fitted letterbox image (1.0 = fitted; pinch-clamped 0.5×–5×). Display-only,
-  held in the shared `ViewportTransform` together with pan/rotation/flips.
-- **`previewScale`** — the **fold resolution ratio** (≤ 1): how much smaller a
-  preview-sized fold is than its full-size base (1.0 = full pixel resolution).
-  It is the resolution key of every preview-sized fold and cache.
-- **`canvasFitScale`** — the **letterbox fit ratio**: a bitmap's on-screen side
-  divided by its own pixel side (how much the preview-sized image is shrunk or
-  grown to fill the letterbox), before any user zoom.
+  held in the shared `ViewportTransform` together with pan — the orientation
+  (rotation, flips) is **separate editor state** applied to the live composite
+  only (see `docs/effects_reference.md`, *Preview interaction model*).
+- **`previewScale`** — the **per-layer fold resolution ratio** (≤ 1): how much
+  smaller a layer's preview-sized fold is than that layer's full-size output
+  (1.0 = full pixel resolution). **Each layer has its own** `previewScale` —
+  `previewScale = min(1, previewSizeMaxSide / estimatedOutputSize(prefix).maxSide)`
+  — chosen so the layer's preview image's maximum side equals `previewSizeMaxSide`;
+  only a dimension-affecting commit changes it. It is the resolution key of every
+  preview-sized fold and cache.
+- **`canvasFitScale`** — the **letterbox fit ratio**: a preview-sized image's
+  on-screen side divided by its own pixel side (how much the pinned preview
+  image is shrunk or grown to fill the letterbox), before any user zoom. It
+  follows the app window (changes on an orientation change / split-resize).
 - **`displayScale`** = `canvasFitScale` × `canvasZoom` — the total on-screen
   magnification of the preview-sized image in device pixels (preview px →
-  screen px). **`displayScale` > 1 is the one condition that means "the visible
+  screen px); it changes with `canvasFitScale` (window-driven) and `canvasZoom`.
+  **`displayScale` > 1 is the one condition that means "the visible
   pixels outgrow the preview-sized image — use the full-size cache image"**;
   every "full size when zoom is past 100%" rule below is exactly that
   condition.
@@ -380,7 +388,10 @@ with the lazy full-size `lastImage` (see *All `lastImage` logic is lazy*).
 >    (or relative to the short edge) — never fixed pixel amounts nor
 >    "full-detail only" quantities — so an effect applied to the preview-sized
 >    base and applied to the full-size composite is **the same effect at two
->    scales**, scaling proportionally in both axes. "Evaluating the full-size
+>    scales**, scaling proportionally in both axes. Positional layers further
+>    carry the reference base dimensions they were normalised against and map
+>    through a centre-origin uniform fit (see *Positional layers* below).
+>    "Evaluating the full-size
 >    picture" happens **only** on **`displayScale` > 1**, **merge**, or
 >    **save/share** — and that rule is literal: a display that outgrows the
 >    preview-sized image applies the current effect
@@ -392,6 +403,93 @@ with the lazy full-size `lastImage` (see *All `lastImage` logic is lazy*).
 >    full-quality geometry is resolved in the background at the **geometry-track
 >    resolution — the adaptive 1–4 MP budget, never the full-size photo** (see
 >    *Lazy beauty geometry* and *Adaptive ML input resolution*).
+
+### Positional layers — anchored reference base, centre-origin, uniform fit
+
+Every layer that owns a **positional object** — **stickers**, **text**, and every
+**brush / stroke** tool (pen, beauty pen, mosaic, object removal, blur brush), plus
+any other overlay that places something on the image at coordinates — carries two
+things with it: its normalised geometry and the **reference base dimensions** the
+geometry was normalised against.
+
+1. **Each positional layer stores the full-size dimensions (width × height) of
+   the base image it was created against** as a parameter of the layer, side by
+   side with its geometry. This is the image — in full-size image pixels — the
+   user was looking at when they placed the object: the prefix's output
+   dimensions at the stack position and session where the layer was composed.
+2. **The geometry lives in a centre-origin space**: `(0, 0)` is the **middle** of
+   the reference base, and every quantity (the object's centre `x`/`y`, its
+   sizes, aspect ratios and extents) is a fraction of the reference base's own
+   axes. Nothing is stored in fixed pixels.
+3. **Mapping to any destination image is a uniform fit through the reference
+   base.** A destination image — preview-sized or full-sized, any aspect — is
+   treated as the reference base **fitted inside** it: the reference frame is
+   centred in the destination and scaled by a **single factor**
+   (`min(dstW / refW, dstH / refH)`), preserving the aspect ratio; the stored
+   geometry resolves against that fitted frame. **One axis is never scaled
+   independently of the other, and the frame is never stretched or shrunk along a
+   single side** — the object keeps its exact proportional position, size and
+   aspect no matter which destination renders it.
+4. **The stored reference base follows the layer's actual base image — it is
+   never a frozen snapshot; its resolution changes with the base.** The
+   reference dimensions always equal the dimensions of the base the layer
+   currently composites over, so they must be **re-anchored whenever that base
+   changes**:
+   - A **parameter change or removal of a previous effect** in the stack
+     re-renders the prefix at new dimensions (a crop rect widened or narrowed, a
+     rotate added or removed, a frame or background-grow toggled). The layer
+     re-derives its reference from the **new base** at the moment it re-bakes.
+   - **Moving the layer to a different stack position** changes which effects
+     sit beneath it; the new prefix's output dimensions are the new base and the
+     layer re-anchors to them the same way.
+   - Re-anchoring re-expresses the geometry from the old frame into the new one
+     with the **same centre-origin uniform-fit** transform the renderer uses, so
+     the object's on-image position, size and aspect are **unchanged** — never
+     stretched on one side — and the reference always ends up equal to the
+     actual base. Every later render then resolves the geometry directly, with
+     no stale-frame fitting and no accumulated drift.
+
+Consequences of the anchored uniform-fit rule:
+
+- **Preview and full size draw the same effect.** The dimension-agnostic rule
+  above holds literally for positional objects: mapping the same reference base
+  into the preview-sized bitmap and into the full-size composite places the
+  object at the identical fraction, because both destinations pass through the
+  same uniform-fit reference.
+- **Upstream dimension changes never deform or displace an earlier layer.**
+  A **later** effect — one that sits **after** the positional layer in the stack:
+  crop, transform (rotate 90°/270° swaps width and height; free rotate can change
+  the bounding box), background-replace **growth** of the subject/backdrop, and
+  frames that add an **outer border** — is applied to the layer's
+  **already-composited pixels** (the layer is baked into its own bitmap first),
+  so its changed dimensions can never stretch the layer on one side or shift it
+  by the new aspect. Re-anchoring of the stored reference happens **only** when
+  the layer's **own base** changes — a parameter change or removal of an effect
+  **before** it, or moving the layer (rule 4) — never because of a later effect.
+
+  **Sticker/text + transform rotation — concrete example.** A sticker placed
+  off-centre and a Transform rotation (e.g. 45° free-rotate) sitting **above**
+  it in the stack: the sticker layer rasterises its overlay against the
+  **pre-rotation base** — the prefix output at the sticker's own stack position,
+  using the reference base dimensions stored when the sticker was placed
+  (`refWidth` × `refHeight`). The baked sticker bitmap is composited onto that
+  base, producing a single flat image. The Transform layer above then rotates
+  **that entire composite** around the centre, canvas-grows to fit, and emits
+  the rotated result as its own output. The sticker's relative offset from the
+  centre is preserved — it rotates along with the rest of the image, exactly as
+  if the sticker were painted pixels on the original photo before the rotation
+  was applied. The sticker must **never** be re-rendered or re-positioned
+  against the post-rotation canvas dimensions; its stored reference base is the
+  sole coordinate frame it draws from.
+- **Reordering the stack is resilient.** Moving the layer earlier or later
+  recomputes which pixels sit under it and changes its base; the layer re-anchors
+  its reference to the new prefix's output dimensions (rule 4), so the object
+  keeps its exact on-image position, size and aspect — it never distorts and
+  never drifts in the new arrangement.
+- **Re-entering the tool re-presents the same object.** The overlay is
+  reconstructed from its stored reference geometry, not re-normalised against the
+  current base — whatever the current base's size or aspect, the restored object
+  sits exactly where it was placed.
 
 ### Per-layer preview cache
 
@@ -467,15 +565,15 @@ with the lazy full-size `lastImage` (see *All `lastImage` logic is lazy*).
 > See *Lazy beauty geometry* below.
 
 - Each layer in the stack keeps a **preview-sized cached image** — a small
-  downscaled fold result for that layer, sized to the on-screen pixel footprint
-  (see *Choosing preview resolution* below).
+  downscaled fold result for that layer, its maximum side equal to
+  `previewSizeMaxSide` (see *Choosing preview resolution* below).
 - **Moving across layers** — inspecting a layer, tapping around the Layers
   window, dragging to reorder — uses the **preview cache first**. It is cheap,
   already present for every layer, and gives an instant response without running
   a full fold.
-- The **preview image doubles as the row thumbnail** in the Layers window (scaled
-  to the ≤100×100 box), so separate thumbnail generation is dropped entirely —
-  we always have one per layer anyway.
+- The **preview image doubles as the row thumbnail** in the Layers window (fitted to a box
+  that is **20% of the window width, capped at 100dp**), so separate thumbnail generation is
+  dropped entirely — we always have one per layer anyway.
 - A layer's preview is derived from the layer's committed output at preview
   resolution. It respects the commit-on-lost-focus / one-rule-of-thumb model —
   it is just a smaller render of the same fold, so it stays byte-consistent in
@@ -512,15 +610,16 @@ sized.
 is deliberately **decoupled from the canvas box**: the canvas layout, the
 controls panel and the letterboxing adapt to whatever the window provides (see
 *Canvas layout and gesture scope* in `effects_reference.md`), and the
-**on-screen footprint at a given `canvasZoom` is served by the per-frame
-`previewScale` multiplier** (below), which already downscales the folded image
-to the visible viewport. That multiplier is what handles a small split-screen window; the
-ceiling itself stays the fixed device bound from load. Concretely: after a
-window resize the ceiling is **not recomputed** and `firstPreview` is **not
-re-generated**; the next fold simply uses a smaller `previewScale` from the
-same fixed base. Making the ceiling window-derived would re-dimension every
-preview-sized image on every resize/split/orientation change (and drop the
-memoized base mid-render), which is exactly the instability this model avoids.
+**on-screen footprint at a given `canvasZoom` is served by the `canvasFitScale`
+fit** (below) — the preview images themselves stay pinned to the fixed
+`previewSizeMaxSide`. `canvasFitScale` is what handles a small split-screen
+window; the ceiling itself stays the fixed device bound from load. Concretely:
+after a window resize the ceiling is **not recomputed** and the preview images
+are **not re-generated** — only the **fit** changes: `canvasFitScale` (and with
+it `displayScale`) follows the new letterbox. Making the ceiling window-derived
+would re-dimension every preview-sized image on every resize/split/orientation
+change (and drop the memoized base mid-render), which is exactly the instability
+this model avoids.
 
 From it, the editor generates the **`firstPreview` image on load**:
 `firstPreview` is a **preview-sized** image, produced by **lohalo
@@ -535,23 +634,49 @@ It is the preview-resolution counterpart of `firstFull`: just as folding the
 entire prefix uses `firstFull`, previewing the entire prefix uses
 `firstPreview`.
 
-The **`previewScale` multiplier can change after a dimension-affecting commit**
-(a crop restricts the footprint; a transform rotates it, swapping or growing the
-canvas), so the per-layer preview dimensions are **not a fixed constant**. Each
-layer's desired preview dimensions are computed from the **visible area** — the
-pixel footprint of the region where the preview will actually be drawn — over
-the layer's **estimated full-size output**:
+**`previewSizeMaxSide` is the single resolution value over the whole stack** —
+the same for **every layer**, regardless of app window dimensions or
+orientation. Every preview-sized image in the editor — `firstPreview`, and the
+cached fold of **each** `StackEffect` — has its **maximum side equal to
+`previewSizeMaxSide`** (the other side follows the image's own aspect ratio;
+when a layer's output is smaller than the ceiling, the preview is the layer's
+full-resolution output — the ratio never exceeds full pixel resolution).
+
+Because an effect can change the image size, **each layer has its own
+`previewScale`**, chosen so that layer's preview-sized fold keeps that constant
+max side, and the multiplier changes **only** when a **dimension-affecting
+commit** (a crop restricts the footprint; a transform rotates it, swapping or
+growing the canvas) changes the layer's output size:
 
 ```
-previewSize = visibleDrawnPixels(viewWidth, viewHeight, canvasZoom)
-            + margin                       // some headroom so it looks sharp while panning
-previewScale = previewSize / estimatedOutputSize(prefix)   // per-layer multiplier; updated on dim-changing commits
+previewScale(layer i) = min(1, previewSizeMaxSide / estimatedOutputSize(prefix i).maxSide)
+                                        // per-layer multiplier, never targets upscaling
 ```
 
-The **`canvasFitScale`** is that same preview-sized image fitted into the letterbox
-(its on-screen side divided by its own pixel side); multiplying by `canvasZoom`
-gives the **`displayScale`** — the magnification that decides the full-size
-threshold (see *Zooming past 100%*).
+(equivalently: `previewMaxSide(i) = outputMaxSide(i) × previewScale(i) =
+min(previewSizeMaxSide, outputMaxSide(i))`, where `maxSide` is the larger of
+`estimateStackOutputSize`'s two sides). `previewScale` is therefore **not
+window-derived and not zoom-derived** — it pins that layer's preview image to
+the same `previewSizeMaxSide` every other layer uses, and it is the resolution
+key of the layer's carried `committedPreview` and its per-layer preview-cache
+entry.
+
+Because every preview image is pinned to the same max side, the **on-screen
+magnification cascade is stable across the stack**:
+
+```
+canvasFitScale = letterboxSide / previewSizeMaxSide   // the pinned preview image fit into the current letterbox
+displayScale   = canvasFitScale × canvasZoom          // total on-screen magnification (preview px → screen px)
+```
+
+`canvasFitScale` **follows the app window**: on an orientation change or a
+split-screen / resize the letterbox side changes, so `canvasFitScale` — and with
+it `displayScale` — changes even though **no preview image is re-dimensioned or
+re-folded**. A **`previewScale` change cascades into `displayScale`** through
+the same chain: re-folding a layer after a dimension-affecting commit re-pins
+its preview image to `previewSizeMaxSide`, so the on-screen magnification keeps
+being expressed against the pinned preview resolution. `displayScale` > 1
+remains the one condition for full-size work (see *Zooming past 100%*).
 
 The per-layer **output size is estimated, not rendered**. The editor offers a
 **centralized dimension helper** — `estimateStackOutputSize(startW, startH,
@@ -579,8 +704,9 @@ dimension-affecting effect (crop / transform) is committed or re-committed.
 Full-size work runs **only when the display actually outgrows the preview-sized
 image — `displayScale` = `canvasFitScale` × `canvasZoom` > 1** (colloquially
 "zooming past 100%", i.e. past the preview bitmap's native resolution; the
-precise trigger is `displayScale`) **or needs a full-res result (save)**. At
-that moment the full-size `lastImage` is computed in the **background**:
+precise trigger is `displayScale`) **or needs a full-res result (save / merge /
+share)**. At that moment the full-size `lastImage` is computed in the
+**background**:
 
 ```
 fullSize = fold( currentImage, [currentEffect] + effectsAfterCurrent )
@@ -826,12 +952,15 @@ cache set once the tool is left.
 These are **flag** transitions, not eager renders: setting a cache stale never
 recomputes it; it only records that the next full-size request must re-fold that
 cache (resuming from the best still-fresh prefix) instead of reusing the value.
-The **preview-sized images follow the same position-propagation rule**, with one
-difference: the preview path (per-layer committed preview bitmaps and the
-preview-resolution fold cache) is cheap and always regenerated, so **no stale
-flag is ever set at preview scale — the affected prefixes are simply re-folded
-on the fly** by the next preview request, covering exactly the same positions the
-flags would mark. Only the full-size caches carry real stale flags.
+The **preview-sized images follow the same position-propagation rule**, with
+one difference: no separate stale **flag** is ever persisted at preview scale
+(see *Per-layer preview cache* — the per-layer committed preview bitmaps and
+the preview-resolution fold cache). Staleness there **is** the eviction of the
+cached entry: when a layer's fingerprint changes, that layer's preview entry
+**and every entry after it** (prefix-contagious) are dropped, so the next
+preview request simply finds them missing, sees the prefix is stale, and
+re-folds on the fly — covering exactly the same positions the flags would mark.
+Only the full-size caches carry real persistent stale flags.
 
 **Eye toggle and the current tool.** When an effect is being applied and the
 preview should show **only the current effect** (per the "eye" toggle), the fold
@@ -1146,7 +1275,7 @@ zoom level:
 During interactive editing **each control change re-folds only the tail from the
 edited layer's (new) committed preview** — every later layer's committed preview
 is regenerated in order, and the full-size caches after the change are marked
-stale (see *Staleness is prefix-contagious* in *Per-layer preview cache*); the
+stale (the same prefix-contagious rule, see *Per-layer thumbnail strategy*); the
 new **preview image** is produced — always, on every change, regardless of zoom
 level.
 
@@ -1189,6 +1318,18 @@ A tool's live edits remain **uncommitted** while it is focused. The effect is
 **committed** when the tool **loses focus** — the user selects a different tool,
 opens the Layers window, or taps **Save** — **and only if** its parameters
 **changed and are not the default** values.
+
+(**Beauty is a set of ordinary tools, not an exception.** Each beauty sub-tool
+is its own tool with its own `BeautyStackEffect` layer (see *Beauty — per-sub-tool
+layers + geometry*), and it follows the same commit rule as every other tool:
+while a sub-tool is focused, its live parameter values — and the ML geometry
+derived for them (see *Lazy beauty geometry*) — are held in **editor memory
+only, not in the ordered `effectStack`**; the layer is **committed on lost focus
+exactly like every other layer**, and the live preview shows the focused
+sub-tool's result through the same current-tool preview mechanism as any other
+tool. The stack and the undo history therefore only ever see committed beauty
+milestones, so the undo checkpoints and the dirty flag (*Leaving the editor* in
+`user_guide.md`) behave identically for beauty and for every other tool.)
 
 On commit:
 
@@ -1323,7 +1464,7 @@ context, **and resets the controls of every tool to their default original
 value**. The reset is all-inclusive and unconditional: it covers **every**
 editor tool, not just the colour/photo-look ones — the transform rotation and
 flips return to 0°/no-flip, the crop rectangle is cleared, the frame tiers and
-colours revert to None/white, the background placement returns to fit/no
+colours revert to None / black, the background placement returns to fit/no
 background, the beauty sub-tool values and colour selections revert to their
 defaults, and the beauty pen strokes are cleared — so no control from the
 merged stack still shows a stale value. After the merge every tool behaves as
@@ -1376,8 +1517,16 @@ sticker** is carried the same way with
 its picked image's **content URI** as the source (in place of a preset id);
 the URI is decoded at preview/fold time and only baked when the layer merges.
 Stickers are vector where possible (smooth, resolution-independent scaling);
-raster stickers (from the **Gallery** entry) are resampled with **lohalo**
-interpolation whenever rendered at other than 100%.
+raster stickers (from the **Gallery** entry) are resampled with high-quality
+**filtered (bilinear) resampling** whenever rendered at other than 100%.
+
+**Text is vector.** A `TextItem`'s glyphs are rasterised at their **effective
+on-image size** — the font size combined with the item's own `scale` and the
+destination fold's scale — so enlarging an item with the **selection grid**
+(pinch / corner-resize, which change the item's `scale`, **not** the font-size
+control) re-renders the vector glyphs at the new size and the result stays
+sharp. Text is **never** rasterised at its base size and then bitmap-upscaled,
+which would pixelate the committed and full-size result.
 
 A `TextItem`'s parameters are content, colour (with opacity — a **translucent
 glyph rendered over the outline / background as its own transparency, never
@@ -1411,9 +1560,10 @@ user's `effectStack`:
 2. **Transform and crop** — two independent layers like any other:
    `TransformEffect` rotates/flips the running composite, `CropEffect` restricts
    it to the selected region. No fixed order between them or anything else.
-3. **Adjustments / filter / enhance / style / background** — brightness,
+3. **Adjustments / filter / enhance / background** — brightness,
    contrast, saturation, sharpen, exposure, shadows, highlights, temperature,
-   tint, vignette, then color-filter, skin-denoise, auto-enhance, style-filter,
+   tint, vignette, then **filters** (one `layer:FILTER` carrying the
+   color/style/lens options as controls), skin-denoise, auto-enhance,
    background.
 4. **Brush / overlay** — pen, mosaic, blur brush, object-removal strokes
    (`BitmapDiffEffect`), then stickers (`StickerEffect`), text (`TextEffect`).
@@ -1464,7 +1614,7 @@ for both membership and order — it does not prepend a separate beauty bundle.
 A **Layers button** in the editor UI opens a **Layers window** listing every
 effect applied so far:
 
-- **Thumbnail on the left** of each row (≤100×100 px, lazily generated).
+- **Thumbnail on the left** of each row (20% of the window width, capped at 100dp).
 - **Drag handle on the far left**: drag a row's move handle **up/down to
   reorder** the stack (undoable via `moveEffect`).
 - **Reorder drag feedback (drop slot):** while a row is being dragged, the list
@@ -1494,18 +1644,20 @@ final image.
 
 There is **no separate thumbnail bitmap** to generate. Each layer keeps a
 **preview-sized cached image** (see *Performance / preview cache* below), so the
-row thumbnail is simply that preview image scaled to fit the **≤100×100 px** box —
+row thumbnail is simply that preview image scaled to fit the Layers-row box —
+**20% of the window width, capped at 100dp** (the same aspect-preserving uniform
+fit, never stretched on one side) —
 an instant, memory-light operation with no extra fold. Because every layer has a
 preview image by construction, a thumbnail is always available the moment the
 Layers window opens.
 
-- A layer's preview image starts as `null` (stale) and is computed lazily; the
+- A layer's preview image starts as `null` and is computed lazily; the
   Layers window reads whatever is already present and only (re)computes missing /
   stale entries.
 - Whenever a layer's parameters change (a slider moved, a brush stroke
   committed, a style/filter/background/frame/crop updated), that layer's preview
-  image is flagged stale, so it is lazily recomputed on the next need (window
-  open, zoom, or full fold).
+  is **evicted** (its entry dropped, flagged stale for the next pass), so it is
+  lazily recomputed on the next need (window open, zoom, or full fold).
 - **Staleness is prefix-contagious:** if a layer's preview is stale, then
   **every layer after it is stale by definition** — that changed layer's output
   feeds each later layer. We stop scanning at the first stale entry: all
@@ -1519,8 +1671,11 @@ Layers window opens.
 - Re-committing an **already-stacked** layer at a non-tail position follows the
   same position rule as the full-size caches (see *Re-commit of a re-edited
   layer at a non-tail position*), applied on the fly: the preview of the
-  re-edited layer and every preview after it is recomputed when next needed —
-  no flag is ever persisted at preview scale.
+  re-edited layer and every preview after it is recomputed when next needed.
+  Like the rest of the preview path, **no stale flag is ever persisted** — the
+  fingerprint-driven eviction above is the only marker (the full-size caches'
+  explicit staleness flags are described in *Centralized full-size controller
+  and fold-to-index*).
 
 ### Revisiting an effect window without changing anything
 

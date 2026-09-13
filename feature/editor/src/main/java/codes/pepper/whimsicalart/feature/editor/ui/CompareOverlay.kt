@@ -38,8 +38,8 @@ fun CompareOverlay(
         modifier = modifier
             .fillMaxSize()
             .graphicsLayer {
-                scaleX = transform.scale * (if (flipHorizontal && !isComparing) -1f else 1f)
-                scaleY = transform.scale * (if (flipVertical && !isComparing) -1f else 1f)
+                scaleX = transform.canvasZoom * (if (flipHorizontal && !isComparing) -1f else 1f)
+                scaleY = transform.canvasZoom * (if (flipVertical && !isComparing) -1f else 1f)
                 rotationZ = if (isComparing) 0f else rotation
                 translationX = transform.offsetX
                 translationY = transform.offsetY

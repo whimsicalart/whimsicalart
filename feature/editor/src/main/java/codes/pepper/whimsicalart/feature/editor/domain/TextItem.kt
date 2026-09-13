@@ -148,5 +148,16 @@ data class TextItem(
     val background: TextBackgroundShape = TextBackgroundShape.NONE,
     val backgroundColor: Int = Color.BLACK,
     /** Blur-background intensity 0..1 (`0` = no blur, `1` = maximum); other shapes ignore it. */
-    val backgroundBlur: Float = 0f
+    val backgroundBlur: Float = 0f,
+    /**
+     * The anchored reference base of this text item (docs/effect_stack.md →
+     * *Positional layers*): the full-size pixel dims of the image its
+     * [x]/[y]/[fontSize] (and shadow/outline width fractions) were captured
+     * against. The renderer lays the block out through the uniform fit of these
+     * dims into the running bitmap, so the text keeps its on-image position and
+     * size when an earlier effect changes the base. `0×0` (default) keeps the
+     * un-anchored identity mapping.
+     */
+    val referenceWidth: Int = 0,
+    val referenceHeight: Int = 0
 )

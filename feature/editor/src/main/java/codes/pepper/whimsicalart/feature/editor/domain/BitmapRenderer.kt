@@ -44,7 +44,18 @@ data class StrokeLayer(
      */
     val hardness: Float = 1f,
     /** The pen brush shaping used to commit this stroke (defaults to SOLID). */
-    val brush: PenBrushKind = PenBrushKind.SOLID
+    val brush: PenBrushKind = PenBrushKind.SOLID,
+    /**
+     * The anchored reference base of this stroke (docs/effect_stack.md →
+     * *Positional layers*): the full-size pixel dims the points/[brushSize]
+     * fractions were captured against. When set, the renderer maps the stroke
+     * through the uniform fit of [referenceWidth]×[referenceHeight] into the
+     * running bitmap (see [StrokeOverlayRenderer]), so a layer keeps its
+     * on-image position and width when an earlier effect changes the base.
+     * `0×0` (default) keeps the un-anchored identity mapping.
+     */
+    val referenceWidth: Int = 0,
+    val referenceHeight: Int = 0
 )
 
 /**

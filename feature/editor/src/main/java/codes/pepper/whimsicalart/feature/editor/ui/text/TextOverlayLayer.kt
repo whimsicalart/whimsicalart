@@ -257,13 +257,19 @@ val currentResizeTarget: (id: String) -> OverlayResizeTarget? = { id ->
                 // from the preview bitmap and paints a pre-rendered feathered blur
                 // oval behind the text (see buildTextBlurPiece).
                 var blurHolder by remember(overlay.id) { mutableStateOf<TextBlurPiece?>(null) }
+                // The cache key is the ACTUAL single-rule inputs the piece
+                // consumes (see [textBlurPieceKey] and [buildTextBlurPiece] →
+                // `toTextItem` → `scaledBlurCoverRect`), NOT the compose box's
+                // `measured` size. The reported bug: an edit that re-lays-out
+                // into the SAME box size (font family change, a style flag with
+                // equal line counts, a rewrap that keeps the block bounds) left
+                // every old key equal, so the OLD pre-blurred window was drawn
+                // until an unrelated key (position/scale) happened to move.
+                // `measured` stays only as the "laid out" gate key, so the piece
+                // is born once the item has sized itself.
+                val blurKey = textBlurPieceKey(overlay)
                 val blurPiece = remember(
-                    overlay.id,
-                    overlay.backgroundShape,
-                    overlay.backgroundBlur,
-                    overlay.scale,
-                    overlay.position.x,
-                    overlay.position.y,
+                    blurKey,
                     measured,
                     sourceBitmap,
                     blurFrame,
@@ -309,8 +315,8 @@ val currentResizeTarget: (id: String) -> OverlayResizeTarget? = { id ->
                                 Modifier.drawBehind {
                                     drawImage(
                                         image = blurPiece.image,
-                                        srcOffset = IntOffset(blurPiece.src.left, blurPiece.src.top),
-                                        srcSize = IntSize(blurPiece.src.width(), blurPiece.src.height()),
+                                        srcOffset = IntOffset.Zero,
+                                        srcSize = IntSize(blurPiece.image.width, blurPiece.image.height),
                                         dstOffset = IntOffset(
                                             ((size.width - dst.width) / 2f).roundToInt(),
                                             ((size.height - dst.height) / 2f).roundToInt()
@@ -333,6 +339,22 @@ val currentResizeTarget: (id: String) -> OverlayResizeTarget? = { id ->
                     val textLayout = remember(overlay.text, style, textMeasurer) {
                         textMeasurer.measure(AnnotatedString(overlay.text), style)
                     }
+                    // A TRANSLUCENT fill must never show its shadow through the
+                    // glyph (spec: effects_reference.md → *Text* → "The shadow is
+                    // hollowed out of the glyph like the outline"). The shadow is
+                    // then drawn separately in drawBehind (isolated layer + clear,
+                    // mirroring the committed rasteriser's negative-mask pass), so
+                    // the Text fill itself carries NO shadow — the translucent
+                    // glyph reveals the image instead. An OPAQUE fill keeps the
+                    // style-embedded shadow (the opaque glyph hides what is under
+                    // it); that path is unchanged.
+                    val fillStyle = remember(overlay) {
+                        if (overlay.usesHollowShadow) {
+                            style.copy(shadow = null)
+                        } else {
+                            style
+                        }
+                    }
                     Text(
                         text = overlay.text,
                         color = overlay.color,
@@ -350,7 +372,7 @@ val currentResizeTarget: (id: String) -> OverlayResizeTarget? = { id ->
                         },
                         textAlign = overlay.alignment.toTextAlign(),
                         textDecoration = textDecorationOf(overlay),
-                        style = style,
+                        style = fillStyle,
                         modifier = Modifier.drawBehind {
                             if (overlay.hasOutline) {
                                 // Mirrors the committed outward-only outline
@@ -376,6 +398,35 @@ val currentResizeTarget: (id: String) -> OverlayResizeTarget? = { id ->
                                         drawStyle = Stroke(width = pass.strokeWidthPx * 2f)
                                     )
                                 }
+                                drawText(
+                                    textLayoutResult = textLayout,
+                                    color = Color.Black,
+                                    drawStyle = Fill,
+                                    blendMode = BlendMode.Clear
+                                )
+                                drawIntoCanvas { canvas -> canvas.restore() }
+                            }
+                            if (overlay.usesHollowShadow) {
+                                // Hollow shadow for a translucent fill: the shadowed
+                                // glyph is drawn into an isolated layer at FULL
+                                // opacity (its own style already carries the shadow),
+                                // then the glyph fill shape is cleared out of the
+                                // layer — the same negative-mask pass used for the
+                                // outline above. Only the shadow's EXTERNAL band (the
+                                // offset silhouette outside the glyph) survives; the
+                                // translucent fill drawn by the Text composable on top
+                                // reveals the image through the glyph instead of the
+                                // shadow. A fully transparent fill (alpha 0) shows the
+                                // shadow only as the external hollow silhouette.
+                                drawIntoCanvas { canvas ->
+                                    canvas.saveLayer(Rect(Offset.Zero, size), androidx.compose.ui.graphics.Paint())
+                                }
+                                drawText(
+                                    textLayoutResult = textLayout,
+                                    color = overlay.shadowColor,
+                                    alpha = 1f,
+                                    drawStyle = Fill
+                                )
                                 drawText(
                                     textLayoutResult = textLayout,
                                     color = Color.Black,
@@ -575,6 +626,55 @@ data class TextBlurPiece(
 )
 
 /**
+ * The preview bitmap the LIVE text-blur piece must read the photo pixels from,
+ * in display priority: the folded [compositePreview] (what the eye-ON / stacked
+ * canvas actually shows), else the [sharpenedPreview] look pass, else the
+ * ORIENTED BASE decode — the plain-photo state where neither a stack fold nor a
+ * look pass has produced a bitmap, and the canvas simply shows the Coil decode
+ * of the uri (whose content the oriented base matches exactly). WITHOUT this
+ * base fallback the live source is null on any untouched photo, the
+ * `sourceBitmap != null` gate in the blur-piece `remember` stays false, and the
+ * BLUR background never renders live (only at commit) — the reported bug.
+ */
+internal fun resolveLiveTextBlurSource(
+    compositePreview: Bitmap?,
+    sharpenedPreview: Bitmap?,
+    baseBitmap: Bitmap?
+): Bitmap? = compositePreview ?: sharpenedPreview ?: baseBitmap
+
+/**
+ * The live blur-piece CACHE KEY — the actual single-rule inputs the piece
+ * consumes: [TextOverlay.toTextItem] → [TextOverlayRenderer.scaledBlurCoverRect]
+ * → `measureTextBlock` (text, fontSize, fontFamily, the bold/italic/underline/
+ * strikethrough flags in [TextOverlay.style], alignment) plus the per-item
+ * geometry (scale, position, rotation) and the blur intensity. It deliberately
+ * EXCLUDES the compose box's `measured` size — a text edit that re-lays-out into
+ * the same box must still rebuild, or a stale pre-blurred window is drawn (the
+ * reported bug) — and it excludes metrics the cover rule does NOT consume:
+ * shadow, outline and background colour. Rotation IS in the key: the shared
+ * blur core now re-samples the photo content under the ROTATED footprint
+ * ([TextOverlayRenderer.blurRegionOval]), so a rotation delta changes which
+ * photo pixels the oval blurs and must rebuild the piece — mirroring the spec
+ * (effects_reference.md → *Text* → *Background blur semantics*: ANY footprint
+ * change regenerates the cached background). This matches how the committed
+ * rasteriser recomputes the committed oval for the same [TextItem] block key.
+ */
+internal fun textBlurPieceKey(overlay: TextOverlay): String = listOf(
+    overlay.id,
+    overlay.backgroundShape,
+    overlay.backgroundBlur,
+    overlay.scale,
+    overlay.rotation,
+    overlay.position.x,
+    overlay.position.y,
+    overlay.text,
+    overlay.fontSize,
+    overlay.fontFamily,
+    overlay.style.sorted().joinToString(","),
+    overlay.alignment
+).joinToString("|")
+
+/**
  * Previews the committed BLUR background for one text item: decides the bitmap
  * window under the padded block (inflated by the feather band) using the same
  * normalised mapping the committed rasteriser applies, then runs the SHARED
@@ -636,7 +736,12 @@ internal fun buildTextBlurPiece(
     if (rw < 1 || rh < 1) return null
     val blended = TextOverlayRenderer.blurRegionOval(
         sourceBitmap, sx, sy, rw, rh,
-        inner, radius, feather
+        // [overlay.rotation] is forwarded so the shared core re-samples the
+        // photo under the ROTATED oval footprint (the box's graphicsLayer
+        // rotates the piece back into place); the window stays the UNROTATED
+        // scaled cover, whose rotation is exactly the rotated cover's footprint.
+        inner, radius, feather,
+        overlay.rotation
     )
     return TextBlurPiece(
         bitmap = blended,

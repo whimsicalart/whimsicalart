@@ -5,6 +5,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import codes.pepper.whimsicalart.core.domain.UniformFit
 import codes.pepper.whimsicalart.feature.editor.domain.TextAlignment
 import codes.pepper.whimsicalart.feature.editor.domain.TextBackgroundShape
 import codes.pepper.whimsicalart.feature.editor.domain.TextFont
@@ -42,7 +43,17 @@ data class TextOverlay(
     val backgroundShape: TextBackgroundShape = TextBackgroundShape.NONE,
     val backgroundColor: Color = Color.Black,
     val backgroundBlur: Float = 0f
-)
+) {
+    /**
+     * True when this item's shadow must be HOLLOWED out of the glyph rather than
+     * drawn through it — i.e. the font colour's opacity is below 100%
+     * (spec: effects_reference.md → *Text* → "The shadow is hollowed out of the
+     * glyph like the outline": a translucent fill reveals the image through the
+     * glyph, never the shadow; an opaque fill is unchanged).
+     */
+    val usesHollowShadow: Boolean
+        get() = hasShadow && color.alpha < 1f
+}
 
 /**
  * Normalizes this dp-space editing item against the FITTED image rect within the
@@ -56,7 +67,9 @@ fun TextOverlay.toTextItem(
     frameWidthPx: Float,
     frameHeightPx: Float,
     frameOffsetX: Float = 0f,
-    frameOffsetY: Float = 0f
+    frameOffsetY: Float = 0f,
+    referenceWidth: Int = 0,
+    referenceHeight: Int = 0
 ): TextItem {
     val px = { dp: Float -> with(density) { dp.dp.toPx() } }
     val w = if (frameWidthPx > 0f) frameWidthPx else 1f
@@ -87,7 +100,9 @@ fun TextOverlay.toTextItem(
         ),
         background = backgroundShape,
         backgroundColor = backgroundColor.toArgb(),
-        backgroundBlur = backgroundBlur
+        backgroundBlur = backgroundBlur,
+        referenceWidth = referenceWidth,
+        referenceHeight = referenceHeight
     )
 }
 
@@ -101,14 +116,37 @@ fun TextItem.toTextOverlay(
 ): TextOverlay {
     val w = if (frameWidthPx > 0f) frameWidthPx else 1f
     val h = if (frameHeightPx > 0f) frameHeightPx else 1f
+    // With an anchored reference the stored fractions belong to that reference,
+    // not the current frame: re-express them through the uniform fit of the
+    // reference into the CURRENT frame (spec rule 5), so the restored overlay
+    // lands where the committed render shows it even when the frame drifts.
+    val xPx: Float
+    val yPx: Float
+    val fontPx: Float
+    val shadowPx: Float
+    val outlinePx: Float
+    if (referenceWidth > 0 && referenceHeight > 0) {
+        val fit = UniformFit.of(w.toInt(), h.toInt(), referenceWidth, referenceHeight)
+        xPx = fit.frameX(x, referenceWidth)
+        yPx = fit.frameY(y, referenceHeight)
+        fontPx = fit.measureX(fontSize, referenceWidth)
+        shadowPx = fit.measureX(shadow.distance, referenceWidth)
+        outlinePx = fit.measureX(outline.size, referenceWidth)
+    } else {
+        xPx = x * w
+        yPx = y * h
+        fontPx = fontSize * w
+        shadowPx = shadow.distance * w
+        outlinePx = outline.size * w
+    }
     return TextOverlay(
         id = id,
         text = text,
         position = Offset(
-            with(density) { (x * w + frameOffsetX).toDp().value },
-            with(density) { (y * h + frameOffsetY).toDp().value }
+            with(density) { (xPx + frameOffsetX).toDp().value },
+            with(density) { (yPx + frameOffsetY).toDp().value }
         ),
-        fontSize = with(density) { (fontSize * w).toDp().value },
+        fontSize = with(density) { fontPx.toDp().value },
         color = Color(color),
         fontFamily = fontFamily,
         style = style,
@@ -117,10 +155,10 @@ fun TextItem.toTextOverlay(
         rotation = rotationDegrees,
         hasShadow = shadow.enabled,
         shadowAngle = shadow.angleDegrees,
-        shadowDistance = with(density) { (shadow.distance * w).toDp().value },
+        shadowDistance = with(density) { shadowPx.toDp().value },
         shadowColor = Color(shadow.color),
         hasOutline = outline.enabled,
-        outlineSize = with(density) { (outline.size * w).toDp().value },
+        outlineSize = with(density) { outlinePx.toDp().value },
         outlineColor = Color(outline.color),
         outlineBlur = outline.blur,
         backgroundShape = background,

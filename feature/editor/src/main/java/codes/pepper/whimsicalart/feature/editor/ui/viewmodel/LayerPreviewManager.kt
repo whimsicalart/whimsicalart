@@ -37,6 +37,18 @@ internal class LayerPreviewManager(
      * own **carried** [StackEffect.committedPreview] — the field the next layer's
      * fold resumes from, and the interactive preview path folds from.
      *
+     * Each layer folds at ITS OWN pinned scale — `scale_i = min(1,
+     * previewSizeMaxSide / estimatedOutputSize(prefix i).maxSide)` — supplied by
+     * [computePrefixScale], so every layer's committed preview has max side ==
+     * the fixed preview ceiling (capped at the layer's own prefix output when
+     * smaller; never an upscale). When the scale switches mid-chain (a
+     * crop/transform shrinks or grows a prefix's output), the chain RE-BASES:
+     * [renderLayerTail] is handed a `null` resume composite so it folds the whole
+     * prefix from a base at the NEW scale — the only way each prefix's preview
+     * can sit at its own pinned resolution while keeping the incremental chain
+     * byte-identical to a base fold. Within a steady scale run the chain resumes
+     * from the previous layer's carried preview exactly as before.
+     *
      * Runs the whole chain from [base]; the callers (commit / Layers-window open)
      * have already evicted the stale tail (prefix-contagious), so unchanged
      * prefixes short-circuit through the fingerprint fast-path and only the
@@ -53,17 +65,30 @@ internal class LayerPreviewManager(
      * (per-layer preview cache vs the controller's 3-image full/preview cache)
      * separate.
      *
-     * @param renderLayerTail folds effect stack prefix i (resuming the fold from
-     *   [prevComposite]) into the next layer's preview bitmap.
+     * @param base the fold base at the FIRST layer's scale (the chain start; on
+     *   a scale switch the renderer re-resolves its own base via [renderLayerTail]).
+     * @param computePrefixScale the i-th layer's OWN pinned preview scale, derived
+     *   from its prefix's estimated output footprint.
+     * @param renderLayerTail folds effect-stack prefix i into the layer's preview
+     *   bitmap. A NON-NULL [Bitmap] second arg resumes the incremental chain from
+     *   that composite at the given scale; a NULL second arg signals a scale
+     *   switch (re-base): the whole prefix is folded from a base at the given
+     *   scale. May return null only when no base can be resolved.
      * @return the published layer thumbnails and the fingerprints map to commit.
      */
     suspend fun rebuildCommittedPreviews(
         stack: List<StackEffect>,
-        scale: Float,
         base: Bitmap,
-        renderLayerTail: suspend (i: Int, prevComposite: Bitmap) -> Bitmap
+        computePrefixScale: (i: Int) -> Float,
+        renderLayerTail: suspend (i: Int, prevComposite: Bitmap?, scale: Float) -> Bitmap?
     ): Pair<HashMap<String, Bitmap>, Map<String, String>> {
+        if (stack.isEmpty()) return HashMap<String, Bitmap>() to emptyMap()
         var prevComposite: Bitmap = base
+        // The scale run the incremental chain currently walks. When the pinned
+        // per-layer scale switches, the tail is RE-BASED (never resumed from a
+        // preview at the old scale — that would pin the tail at the wrong
+        // resolution).
+        var prevScale = computePrefixScale(0)
         // Prefix-validity: while every layer up to i is cached with a matching
         // fingerprint at the same dims, prevComposite can walk the cache; at
         // the first stale layer the whole tail is re-folded incrementally.
@@ -72,25 +97,40 @@ internal class LayerPreviewManager(
             val effect = stack[i]
             val key = effect.layerKey
             val fp = fingerprintOf(effect)
+            val layerScale = computePrefixScale(i)
+            if (layerScale != prevScale) chainValid = false
             val cached = layerPreviewCache[key]
             if (chainValid && cached != null && !cached.isRecycled &&
                 layerPreviewFingerprints[key] == fp &&
                 cached.width == prevComposite.width && cached.height == prevComposite.height
             ) {
-                // Unchanged layer: reuse the cached bitmap and carry it on the
-                // (possibly fresh) instance — no re-render, no new bitmap.
+                // Unchanged layer at the SAME pinned scale: reuse the cached
+                // bitmap and carry it on the (possibly fresh) instance — no
+                // re-render, no new bitmap.
                 effect.committedPreview = cached
                 prevComposite = cached
+                prevScale = layerScale
                 continue
             }
             chainValid = false
-            val rendered = if (effect is MergedEffect) {
+            val rebase = layerScale != prevScale
+            val rendered = if (rebase || effect !is MergedEffect) {
+                withContext(Dispatchers.Default) {
+                    renderLayerTail(i, if (rebase) null else prevComposite, layerScale)
+                }
+            } else {
                 // A merged layer is the identity bake of its base at preview
                 // resolution (its image is full-size; folding it would leak
-                // full-size pixels into the preview cache).
+                // full-size pixels into the preview cache). Folded at the steady
+                // scale it is carried forward untouched; on a scale switch the
+                // renderer re-bakes it at the new scale (the `rebase` branch).
                 prevComposite
-            } else {
-                withContext(Dispatchers.Default) { renderLayerTail(i, prevComposite) }
+            }
+            if (rendered == null) {
+                // The base for this layer's scale could not be resolved — leave
+                // the layer without a carried preview and keep the chain invalid.
+                prevScale = layerScale
+                continue
             }
             val stored = rendered.copy(Bitmap.Config.ARGB_8888, true)
             if (rendered !== prevComposite && !rendered.isRecycled) rendered.recycle()
@@ -102,6 +142,7 @@ internal class LayerPreviewManager(
             // preview cache).
             effect.committedPreview = stored
             prevComposite = stored
+            prevScale = layerScale
         }
         // Bounded LRU-by-insertion: drop the oldest entries beyond the cap and
         // null the carried field on the live layer holding a dropped bitmap so a

@@ -223,30 +223,48 @@ class EditorOverlayCacheTest {
         assertEquals(0, TextOverlayRenderer.textRasterCount)
     }
 
-    // --- Text pinch-scale parity (tracker → next.md: text/sticker pinch-scale
-    //     commit mismatch) ----------------------------------------------
+    // --- Text pinch-scale vector re-render (next.md → *Text scaled via the
+    //     selection grid comes out pixelated*) -----------------------------
 
     @Test
-    fun `a pinch-scaled text item reuses the scale-free block and never re-rasterises`() {
-        // scale² regression guard (tracker → next.md: text pinch-scale commit
-        // mismatch): the committed path used to bake t.scale into the measured
-        // textSize AND draw under draw.scale — the live overlay scales once, so
-        // committed ≠ canvas. The block now measures unscaled and composites
-        // under ONE draw.scale: both scales must share the same single raster.
+    fun `a grid-scaled text item re-rasterises the vector glyphs at the effective size`() {
+        // Text is vector (docs/effect_stack.md): glyphs are rasterised at their
+        // effective on-image size — font size × item scale — so an item enlarged
+        // through the selection grid RE-RENDERS the vector glyphs instead of
+        // bitmap-upscaling a base-size raster (which is what pixelates the
+        // committed result). Scale is therefore part of the block's raster key
+        // (never a composite-time canvas scale), and a change of scale ALWAYS
+        // re-rasterises.
         TextOverlayRenderer.clearTextCache()
         val base = text("t", "Scaled", fontSize = 0.2f)
         val a = Bitmap.createBitmap(200, 200, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }
-        val b = Bitmap.createBitmap(200, 200, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }
         TextOverlayRenderer.drawTexts(context, a, listOf(base.copy(scale = 1f)))
         val afterFirst = TextOverlayRenderer.textRasterCount
+
+        val b = Bitmap.createBitmap(200, 200, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }
         TextOverlayRenderer.drawTexts(context, b, listOf(base.copy(scale = 1.5f)))
-        assertEquals("scale is composite-time, the scaled item must not re-rasterise", afterFirst, TextOverlayRenderer.textRasterCount)
+        assertTrue(
+            "a scale change is a new raster: the vector glyphs re-render at the scaled size",
+            TextOverlayRenderer.textRasterCount > afterFirst
+        )
+
+        // The sharp block for THIS scale is now cached — the very next fold at
+        // the same scale recomposites the full-resolution raster.
+        val afterScaled = TextOverlayRenderer.textRasterCount
+        val c = Bitmap.createBitmap(200, 200, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }
+        TextOverlayRenderer.drawTexts(context, c, listOf(base.copy(scale = 1.5f)))
+        assertEquals("an unchanged scale on the next fold reuses the scaled raster", afterScaled, TextOverlayRenderer.textRasterCount)
+
         assertTrue("the scale-1 item must actually draw ink", inkBoundingBox(a).isEmpty.not())
         assertTrue("the scale-1.5 item must actually draw ink", inkBoundingBox(b).isEmpty.not())
     }
 
     @Test
-    fun `pinch-rescaling a text item does not re-rasterise the block`() {
+    fun `pinch-rescaling a text item re-rasterises the block at the new effective size`() {
+        // The block key now includes scale — grid-scaling re-renders the vector
+        // glyphs at the new effective on-image size (the sharpness fix); reusing
+        // one base-size raster and bitmap-scaling it at composite time would
+        // pixelate the committed result.
         TextOverlayRenderer.clearTextCache()
         val item = text("t1", "Hello", fontSize = 0.15f)
         val a = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
@@ -254,9 +272,39 @@ class EditorOverlayCacheTest {
         val afterFirst = TextOverlayRenderer.textRasterCount
 
         TextOverlayRenderer.drawTexts(context, a, listOf(item.copy(scale = 1.7f)))
-        assertEquals(
-            "scale is a composite-time transform and not part of the block raster",
-            afterFirst, TextOverlayRenderer.textRasterCount
+        assertTrue(
+            "scale is part of the block raster, so a rescale re-renders the glyphs",
+            TextOverlayRenderer.textRasterCount > afterFirst
+        )
+
+        val afterScaled = TextOverlayRenderer.textRasterCount
+        TextOverlayRenderer.drawTexts(context, a, listOf(item.copy(scale = 1.7f)))
+        assertEquals("a repeated rescale to the SAME scale reuses the raster", afterScaled, TextOverlayRenderer.textRasterCount)
+    }
+
+    @Test
+    fun `the effective glyph size follows item scale - the committed ink grows with scale`() {
+        // Geometry side of the vector rule: the commit draws the scaled raster at
+        // 1:1 (no canvas scale), so the committed ink footprint grows linearly
+        // with the item's scale — the same on-canvas growth as the editor shows.
+        TextOverlayRenderer.clearTextCache()
+        val item = text("t", "Sharp", fontSize = 0.12f)
+        val w = 300
+        val h = 300
+
+        fun inkBox(scale: Float): Rect {
+            TextOverlayRenderer.clearTextCache()
+            val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }
+            TextOverlayRenderer.drawTexts(context, out, listOf(item.copy(scale = scale)))
+            return inkBoundingBox(out)
+        }
+
+        val r1 = inkBox(1f)
+        val r2 = inkBox(2f)
+        assertTrue("the scale-1 item draws some ink", r1.width() > 4 && r1.height() > 4)
+        assertTrue(
+            "a 2x grid-scale doubles the committed ink: ${r1.width()}x${r1.height()} -> ${r2.width()}x${r2.height()}",
+            r2.width() >= r1.width() * 1.5f && r2.height() >= r1.height() * 1.5f
         )
     }
 
@@ -318,9 +366,10 @@ class EditorOverlayCacheTest {
     @Test
     fun `a scaled blur item commits the oval at its scaled window - never at the unscaled size`() {
         // Pixel-level scale parity: the committed path paints the feathered oval
-        // straight from [scaledBlurCoverRect] (scale baked into the geometry —
-        // NO canvas scale), so the blurred band on the committed photo spans
-        // scaledCover ± feather, exactly tracking the scaled glyph block.
+        // from the block's RASTER measure, measured at the item's effective
+        // on-image size (font × scale — scale baked into the geometry, NO canvas
+        // scale), so the blurred band on the committed photo spans scaledCover ±
+        // feather, exactly tracking the scaled glyph block.
         val w = 600
         val h = 400
         val base = text("p", "Parity", fontSize = 0.09f).copy(
@@ -348,15 +397,23 @@ class EditorOverlayCacheTest {
 
         for (scale in listOf(1f, 1.5f, 2f)) {
             val item = base.copy(scale = scale)
+            // The committed oval = [blurCoverRect] of the block's RASTER measure,
+            // which is measured at the item's effective on-image size (font ×
+            // scale) — equal to [scaledBlurCoverRect] of the unscaled measure.
+            // Robolectric quantises glyph advances (measureText at a scaled font
+            // is not exactly scale × the base measurement), so the two coincide
+            // within a few px here; on a real typeface metric scaling is linear
+            // and they coincide exactly. Either way the unscaled cover would be
+            // off by MANY more px, which is what this assertion pins.
             val scaled = TextOverlayRenderer.scaledBlurCoverRect(context, item, w.toFloat(), h.toFloat())
             val feather = (scaled.height() * 0.08f).coerceIn(3f, 32f)
             val expectedFirst = (scaled.left - feather).roundToInt()
             val expectedLast = (scaled.right + feather).roundToInt()
             val (first, last) = blurBand(scale)
             assertEquals("scale=$scale oval begins at scaledCover − feather (left)",
-                expectedFirst.toDouble(), first.toDouble(), 3.0)
+                expectedFirst.toDouble(), first.toDouble(), 5.0)
             assertEquals("scale=$scale oval ends at scaledCover + feather (right)",
-                expectedLast.toDouble(), last.toDouble(), 3.0)
+                expectedLast.toDouble(), last.toDouble(), 5.0)
         }
 
         // The band GROWS with scale (the whole point) — a doubled scale must span
@@ -365,6 +422,60 @@ class EditorOverlayCacheTest {
         val (f2, l2) = blurBand(2f)
         assertTrue("scale 2 band is far wider than the scale 1 band: [$f1,$l1] vs [$f2,$l2]", (l2 - f2) > (l1 - f1) * 1.5f)
     }
+
+    @Test
+    fun `a rotated blur item re-samples the photo behind the rotated oval, never the axis-aligned window`() {
+        // Rotation must re-read the photo under the ROTATED footprint: on a 2D
+        // content pattern the committed pixels differ visibly from the rotate-0
+        // commit (and from the untouched source). A naive rotate-the-window draw
+        // would composite the same axis-aligned content — this guards the
+        // rotation-aware re-sampling end to end through the committed fold.
+        val w = 400
+        val h = 200
+        val src = checkerPhoto(w, h)
+        val item = text("r", "Rot", fontSize = 0.06f).copy(
+            x = 0.5f, y = 0.5f,
+            background = TextBackgroundShape.BLUR,
+            backgroundBlur = 0.8f
+        )
+
+        fun compose(rotationDegrees: Float): Bitmap {
+            TextOverlayRenderer.clearTextCache()
+            val out = src.copy(Bitmap.Config.ARGB_8888, true)
+            TextOverlayRenderer.drawTexts(context, out, listOf(item.copy(rotationDegrees = rotationDegrees)))
+            return out
+        }
+
+        fun diff(a: Bitmap, b: Bitmap): Int {
+            var n = 0
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    if (a.getPixel(x, y) != b.getPixel(x, y)) n++
+                }
+            }
+            return n
+        }
+
+        val flat = compose(0f)
+        val rotated = compose(90f)
+        assertTrue("unrotated commit must actually defocus photo pixels", diff(flat, src) > 20)
+        assertTrue("rotated commit must actually defocus photo pixels", diff(rotated, src) > 20)
+        assertTrue(
+            "a rotation change must repaint a DIFFERENT blurred footprint (flat/rotated differ in ${diff(flat, rotated)} px)",
+            diff(flat, rotated) > 20
+        )
+    }
+
+    private fun checkerPhoto(w: Int, h: Int): Bitmap =
+        Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply {
+            val cell = 25
+            val px = IntArray(w * h) { i ->
+                val x = i % w
+                val y = i / w
+                if ((x / cell + y / cell) % 2 == 0) Color.WHITE else Color.BLACK
+            }
+            setPixels(px, 0, w, 0, 0, w, h)
+        }
 
     private fun gradientPhoto(w: Int, h: Int): Bitmap =
         Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply {

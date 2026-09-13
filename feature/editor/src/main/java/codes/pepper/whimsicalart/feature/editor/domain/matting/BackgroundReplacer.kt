@@ -118,10 +118,13 @@ object BackgroundReplacer {
                 val a = Color.alpha(maskPx[my * maskW + mx])
                 if (a < maskThreshold) {
                     resultPx[idx] = bgPixels[idx]
-                } else if (edge != null && x < maskW && y < maskH && edge[y * maskW + x] < softEdgeWidth) {
+                } else if (edge != null && edge[my * maskW + mx] < softEdgeWidth) {
                     // Soft edge: the backdrop fades into the subject over the
-                    // few-px band inward from the mask path.
-                    val t = edge[y * maskW + x] / softEdgeWidth.toFloat()
+                    // few-px band inward from the mask path. Indexed in MASK
+                    // space (the same uniform mapping as the mask alpha above),
+                    // so a mask smaller than the source (the full-size fold's
+                    // capped ML mask) still feathers along the true boundary.
+                    val t = edge[my * maskW + mx] / softEdgeWidth.toFloat()
                     resultPx[idx] = SoftEdgeBand.blend(sourcePx[idx], bgPixels[idx], t)
                 } else if (a < 255) {
                     val t = (a - maskThreshold) / (255f - maskThreshold)
@@ -240,8 +243,8 @@ object BackgroundReplacer {
                     val a = Color.alpha(maskPx[my * maskW + mx])
                     if (a < maskThreshold) {
                         resultPx[idx] = coverPx[idx]
-                    } else if (edge != null && x < maskW && y < maskH && edge[y * maskW + x] < softEdgeWidth) {
-                        val t = edge[y * maskW + x] / softEdgeWidth.toFloat()
+                    } else if (edge != null && edge[my * maskW + mx] < softEdgeWidth) {
+                        val t = edge[my * maskW + mx] / softEdgeWidth.toFloat()
                         resultPx[idx] = SoftEdgeBand.blend(sourcePx[idx], coverPx[idx], t)
                     } else if (a < 255) {
                         val t = (a - maskThreshold) / (255f - maskThreshold)
@@ -277,16 +280,50 @@ object BackgroundReplacer {
                 val dyo = y - oy - cy
                 // Inverse of d = centre + R(theta)·(scale·(s - sCentre)):
                 // s = sCentre + scale⁻¹·R(-theta)·(d - centre).
+                // The inverse projection can land slightly OUTSIDE the source
+                // (a rotated / scaled-up placement grows the canvas, so edge
+                // destination pixels map just past its bounds). The mask is a
+                // separate bitmap whose dims may be SMALLER than the source's
+                // (full-size folds keep the capped ML mask untouched), so every
+                // sample is indexed in MASK space and clamped, never in source
+                // space off raw `toInt()` truncation — that used to pass a
+                // projected point in `[-1, 0)` (which truncates to 0) and then
+                // floor it to -1 inside [sampleSubject], and to index the
+                // mask-sized [edge] array with source coordinates. Both threw
+                // ArrayIndexOutOfBoundsException exactly in the full-size fold,
+                // which swallowed the failure and left the canvas stuck on the
+                // preview.
                 val su = ((dxo * cosA + dyo * sinA) * invScale) + sCentreX
                 val sv = ((-dxo * sinA + dyo * cosA) * invScale) + sCentreY
                 val si = su.toInt()
                 val sj = sv.toInt()
+                val withinSource = su >= 0f && sv >= 0f && su < w && sv < h
+                // The mask-space indices of the projected source point: the same
+                // uniform mapping the fast paths use, so the [maskPx] and [edge]
+                // buffers are always indexed in-bounds regardless of the mask's
+                // own resolution.
+                val mmx = if (withinSource) {
+                    (si.toLong() * maskW / w).toInt().coerceIn(0, maskW - 1)
+                } else {
+                    0
+                }
+                val mmy = if (withinSource) {
+                    (sj.toLong() * maskH / h).toInt().coerceIn(0, maskH - 1)
+                } else {
+                    0
+                }
                 // The transformed subject: where the projected source point lands
-                // inside the source and the mask marks it as the subject.
+                // inside the source and the mask marks it as the subject. The mask
+                // (and its soft-edge band) live at ML resolution — NEVER the
+                // source's pixel dims — so edge/alpha sampling must map source →
+                // mask exactly like the fast path and the blur processor do; a
+                // straight `edge[sj * maskW + si]` would read out of bounds the
+                // moment a full-size fold runs a smaller cached mask over a larger
+                // base (the old full-size fold used to throw here, and
+                // requestFullFold's runCatching parked the canvas on the preview
+                // image forever).
                 val subjectAlpha =
-                    if (si in 0 until w && sj in 0 until h) {
-                        val mmx = (si.toLong() * maskW / w).toInt().coerceIn(0, maskW - 1)
-                        val mmy = (sj.toLong() * maskH / h).toInt().coerceIn(0, maskH - 1)
+                    if (withinSource) {
                         Color.alpha(maskPx[mmy * maskW + mmx])
                     } else {
                         0
@@ -296,7 +333,7 @@ object BackgroundReplacer {
                     val bgPx = backgroundPixel(coverPx, x - ox, y - oy, w, h)
                     val srcPx = sampleSubject(sourcePx, w, h, su, sv)
                     val alpha = subjectAlpha
-                    val depth = if (edge != null) edge[sj * maskW + si] else softEdgeWidth
+                    val depth = if (edge != null) edge[mmy * maskW + mmx] else softEdgeWidth
                     outPx[outIdx] =
                         if (depth < softEdgeWidth) {
                             SoftEdgeBand.blend(srcPx, bgPx, depth / softEdgeWidth.toFloat())

@@ -10,6 +10,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.navigation.compose.rememberNavController
 import codes.pepper.whimsicalart.core.common.PreferencesManager
@@ -51,10 +52,12 @@ class MainActivity : ComponentActivity() {
                     // ONCE (AppUiScale), so every destination/dialog shares it.
                     AppUiScale {
                         val navController = rememberNavController()
-                        val startDestination = ShareEntry.startDestination(
-                            coldShareUri,
-                            preferencesManager.isFirstLaunch
-                        )
+                        val startDestination = remember(Unit) {
+                            ShareEntry.startDestination(
+                                coldShareUri,
+                                preferencesManager.isFirstLaunch
+                            )
+                        }
                         AppNavGraph(
                             navController = navController,
                             startDestination = startDestination

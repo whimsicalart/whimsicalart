@@ -22,6 +22,7 @@ import codes.pepper.whimsicalart.core.designsystem.LocalUiScale
 fun MosaicPanel(
     state: MosaicEditorState,
     imageUri: android.net.Uri?,
+    faceDetectionAvailable: Boolean,
     onBrushSizeChange: (Float) -> Unit,
     onOpacityChange: (Float) -> Unit,
     onToggleErasing: () -> Unit,
@@ -81,7 +82,7 @@ fun MosaicPanel(
         Row(modifier = Modifier.fillMaxWidth()) {
             TextButton(
                 onClick = onSuggestFaces,
-                enabled = imageUri != null && !state.isSuggesting
+                enabled = faceDetectionAvailable && imageUri != null && !state.isSuggesting
             ) {
                 Text(if (state.isSuggesting) "Detecting…" else "Suggest faces (privacy)")
             }
